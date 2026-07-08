@@ -177,6 +177,15 @@ function tc(sec) {
 
   // 3) fetch a Pixabay clip per segment, normalize to its exact duration
   console.log('Fetching clips + building segments...');
+  // --- clip variety: a seeded, non-repeating picker so EVERY video is genuinely new.
+  // usedClipsFile remembers clip ids used by recent videos (across the whole day and
+  // previous days) so the same stock clip is never reused; seed makes each video's
+  // choices differ even for identical search terms.
+  const usedFile = C.usedClipsFile;
+  let usedList = [];
+  if (usedFile && fs.existsSync(usedFile)) { try { usedList = JSON.parse(fs.readFileSync(usedFile, 'utf8')) || []; } catch (e) {} }
+  const usedSet = new Set(usedList);
+  const rng = (() => { const s = String(C.seed || Date.now()); let h = 1779033703 ^ s.length; for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = (h << 13) | (h >>> 19); } return () => { h = Math.imul(h ^ (h >>> 16), 2246822507); h = Math.imul(h ^ (h >>> 13), 3266489909); h ^= h >>> 16; return (h >>> 0) / 4294967296; }; })();
   const listLines = [];
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i];
@@ -193,14 +202,18 @@ function tc(sec) {
     const data = JSON.parse((await getBuf(api)).toString());
     const hits = data.hits || [];
     if (!hits.length) throw new Error('No Pixabay video for: ' + s.query);
-    // pick the hit whose tags best match the query words (most relevant, not just first)
-    const words = s.query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
-    let hit = hits[0], bestScore = -1;
-    for (const h of hits) {
-      const tags = (h.tags || '').toLowerCase();
-      const score = words.reduce((a, w) => a + (tags.includes(w) ? 1 : 0), 0);
-      if (score > bestScore) { bestScore = score; hit = h; }
-    }
+    // score hits by tag relevance, then pick a NOT-recently-used one at random among
+    // the best matches — relevant but different every time.
+    const qwords = s.query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+    const scored = hits.map((h) => { const tags = (h.tags || '').toLowerCase(); const score = qwords.reduce((a, w) => a + (tags.includes(w) ? 1 : 0), 0); return { h, score }; });
+    const maxScore = Math.max(0, ...scored.map((x) => x.score));
+    let cand = scored.filter((x) => x.score >= maxScore && !usedSet.has(x.h.id));  // best & unused
+    if (!cand.length) cand = scored.filter((x) => !usedSet.has(x.h.id));           // any unused
+    if (!cand.length) cand = scored;                                              // last resort
+    cand.sort((a, b) => b.score - a.score);
+    const topN = cand.slice(0, Math.min(cand.length, 12));
+    const hit = topN[Math.floor(rng() * topN.length)].h;
+    usedSet.add(hit.id); usedList.push(hit.id);
     const v = hit.videos.large || hit.videos.medium || hit.videos.small;
     const raw = path.join(WORK, `raw${i}.mp4`);
     fs.writeFileSync(raw, await getBuf(v.url));
@@ -212,8 +225,10 @@ function tc(sec) {
         `zoompan=z='${zExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${W}x${H}:fps=${FPS},setsar=1,format=yuv420p`,
       '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', seg]);
     fs.writeFileSync(keyPath, key);
-    console.log(`  seg ${i + 1}/${segs.length} "${s.query}" -> ${dur.toFixed(2)}s`);
+    console.log(`  seg ${i + 1}/${segs.length} "${s.query}" -> clip #${hit.id} (${dur.toFixed(2)}s)`);
   }
+  // remember the clips we just used (keep the last 400) so future videos avoid them
+  if (usedFile) { try { fs.writeFileSync(usedFile, JSON.stringify(usedList.slice(-400))); } catch (e) {} }
 
   // 4) concat the silent video track
   fs.writeFileSync(path.join(WORK, 'list.txt'), listLines.join('\n'));

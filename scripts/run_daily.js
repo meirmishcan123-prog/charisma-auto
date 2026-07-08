@@ -49,7 +49,7 @@ RULES:
 תגיבו "אני" אם הגעתם עד לכאן,
 וקבלו את המדריך לפיתוח
 משמעת עצמית 👇
-  Vary only the spoken "cta.en" wording. cta.query = inspiring sunrise/mountain/success stock video.
+  Vary the spoken "cta.en" wording. cta.query = a fresh inspiring visual that fits THIS topic — pick a DIFFERENT one each time (e.g. city skyline at dawn, runner finishing a race, ocean waves, mountain summit, someone celebrating a win, sunrise over water, busy street). Do not always use sunrise.
 - Keep it TIGHT: ~110-125 total English words so the voice is ~52-56s. Valid JSON only.`;
   const body = JSON.stringify({ contents: [{ parts: [{ text: PROMPT }] }], generationConfig: { responseMimeType: 'application/json', temperature: 1.05, maxOutputTokens: 4096 } });
   const r = await req({ hostname: 'generativelanguage.googleapis.com', path: `/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI}`, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, body);
@@ -104,6 +104,8 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
       const outDir = path.join(ROOT, '.work', name);
       fs.rmSync(outDir, { recursive: true, force: true }); fs.mkdirSync(outDir, { recursive: true });
       script.outDir = outDir.replace(/\\/g, '/'); script.pixabayKey = PIXABAY;
+      script.seed = name + '-' + Date.now();                                 // unique per video
+      script.usedClipsFile = path.join(ROOT, 'state', 'used_clips.json');    // shared memory of recent clips
       fs.writeFileSync(path.join(outDir, 'content.json'), JSON.stringify(script), 'utf8');
       execFileSync('node', [RENDER, path.join(outDir, 'content.json')], { stdio: 'inherit' });
       const outVid = path.join(VIDEOS, name + '.mp4');
