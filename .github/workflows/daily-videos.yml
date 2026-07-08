@@ -12,6 +12,9 @@ on:
       max:
         description: 'Max videos this run (for testing)'
         default: '1'
+      dry:
+        description: 'Dry run: render + host but do NOT publish (1/0)'
+        default: '0'
 
 permissions:
   contents: write
@@ -49,4 +52,5 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
           MAX_VIDEOS: ${{ github.event.inputs.max || '99' }}
+          DRY_RUN: ${{ github.event.inputs.dry || '0' }}
         run: node scripts/run_daily.js

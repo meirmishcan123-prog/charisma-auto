@@ -23,6 +23,7 @@ const REPO = process.env.GITHUB_REPOSITORY || 'meirmishcan123-prog/charisma-auto
 const SLOTS = (process.env.SLOTS || '7,9,11,13,15,17,19,21').split(',').map((x) => parseInt(x, 10));
 const MAX = parseInt(process.env.MAX_VIDEOS || '99', 10);
 const DO_TT = process.env.TIKTOK !== '0' && !!TT;
+const DRY = process.env.DRY_RUN === '1'; // render + host, but do NOT schedule/publish
 const KEEP = 24; // how many recent videos to keep hosted
 
 for (const [k, v] of Object.entries({ GEMINI_API_KEY: GEMINI, BUFFER_ACCESS_TOKEN: BUFFER, BUFFER_INSTAGRAM_CHANNEL_ID: IG, PIXABAY_KEY: PIXABAY }))
@@ -114,6 +115,11 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
   }
   if (!made.length) { console.error('No videos produced.'); process.exit(1); }
 
+  if (DRY) {
+    for (const v of made) { const p = path.join(VIDEOS, v.name + '.mp4'); const kb = Math.round(fs.statSync(p).size / 1024); console.log(`  [DRY_RUN] rendered ${v.name}.mp4 (${kb} KB) — not pushing, not scheduling.`); }
+    console.log('\nDRY RUN OK — rendering works. ' + made.length + ' video(s) produced.'); return;
+  }
+
   // prune old videos (keep the most recent KEEP)
   const all = fs.readdirSync(VIDEOS).filter((f) => f.endsWith('.mp4')).sort();
   for (const f of all.slice(0, Math.max(0, all.length - KEEP))) fs.rmSync(path.join(VIDEOS, f));
@@ -132,6 +138,7 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
     const url = `https://raw.githubusercontent.com/${REPO}/main/videos/${v.name}.mp4`;
     let ready = false; for (let i = 0; i < 20 && !ready; i++) { ready = await urlReady(url); if (!ready) await sleep(3000); }
     console.log(`\nScheduling ${v.name} @ ${v.dueAt}  (url ready: ${ready})`);
+    if (DRY) { console.log('  [DRY_RUN] not scheduling/publishing.'); continue; }
     const ig = await schedule(IG, url, v.dueAt, v.caption, false, v.title); console.log('  IG:', ig.slice(0, 200));
     if (DO_TT) { const tt = await schedule(TT, url, v.dueAt, v.caption, true, v.title); console.log('  TT:', tt.slice(0, 200)); }
   }
