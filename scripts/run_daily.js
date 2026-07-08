@@ -51,10 +51,19 @@ RULES:
 משמעת עצמית 👇
   Vary the spoken "cta.en" wording. cta.query = a fresh inspiring visual that fits THIS topic — pick a DIFFERENT one each time (e.g. city skyline at dawn, runner finishing a race, ocean waves, mountain summit, someone celebrating a win, sunrise over water, busy street). Do not always use sunrise.
 - Keep it TIGHT: ~110-125 total English words so the voice is ~52-56s. Valid JSON only.`;
-  const body = JSON.stringify({ contents: [{ parts: [{ text: PROMPT }] }], generationConfig: { responseMimeType: 'application/json', temperature: 1.05, maxOutputTokens: 4096 } });
-  const r = await req({ hostname: 'generativelanguage.googleapis.com', path: `/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI}`, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, body);
-  if (r.status !== 200) throw new Error('Gemini ' + r.status + ': ' + r.body.slice(0, 200));
-  return JSON.parse(JSON.parse(r.body).candidates[0].content.parts[0].text);
+  const body = JSON.stringify({ contents: [{ parts: [{ text: PROMPT }] }], generationConfig: { responseMimeType: 'application/json', temperature: 1.05, maxOutputTokens: 8192 } });
+  // Gemini occasionally returns truncated / rate-limited output — retry a few times.
+  let lastErr;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const r = await req({ hostname: 'generativelanguage.googleapis.com', path: `/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI}`, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, body);
+      if (r.status !== 200) throw new Error('Gemini ' + r.status + ': ' + r.body.slice(0, 200));
+      const script = JSON.parse(JSON.parse(r.body).candidates[0].content.parts[0].text);
+      if (!script.segments || !script.segments.length || !script.cta) throw new Error('script missing segments/cta');
+      return script;
+    } catch (e) { lastErr = e; console.log(`  genScript attempt ${attempt} failed: ${e.message} — retrying...`); await sleep(2500 * attempt); }
+  }
+  throw lastErr;
 }
 
 async function schedule(channelId, videoUrl, dueAt, caption, isTt, title) {
