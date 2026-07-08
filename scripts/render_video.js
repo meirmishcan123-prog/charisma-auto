@@ -1,0 +1,301 @@
+/*
+ * render_video.js — builds a 60-second vertical video for @charisma.il:
+ *   English ElevenLabs voiceover + Hebrew subtitles (Arial Bold) + Pixabay clips
+ *   that switch exactly when the subtitle changes + a fixed CTA at the end.
+ *
+ * Usage:  node render_video.js <content.json>
+ *
+ * content.json:
+ * {
+ *   "outDir": "C:/Users/2pac4/Charsima/Video 1",
+ *   "voiceId": "pNInz6obpgDQGcFmaJgB",           // optional (default Adam)
+ *   "segments": [
+ *     { "en": "English narration line.", "he": "כתובית בעברית.", "query": "stock clip search" },
+ *     ...
+ *   ],
+ *   "cta": { "en": "Comment ...", "he": "תגיבו \"אני\" ...", "query": "sunrise success" }
+ * }
+ *
+ * Needs: ffmpeg/ffprobe (found automatically), ElevenLabs key, Pixabay key.
+ */
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
+const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts');
+
+// Free Microsoft Edge neural TTS -> writes mp3, returns word timings [{t,d} in seconds].
+function edgeTTS(text, voice, outPath) {
+  return new Promise((resolve, reject) => {
+    (async () => {
+      const tts = new MsEdgeTTS();
+      await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3, { wordBoundaryEnabled: true, sentenceBoundaryEnabled: false });
+      const { audioStream, metadataStream } = tts.toStream(text);
+      const out = fs.createWriteStream(outPath);
+      const words = [];
+      audioStream.on('data', (c) => out.write(c));
+      metadataStream.on('data', (chunk) => {
+        try {
+          const m = JSON.parse(chunk.toString());
+          for (const b of (m.Metadata || [])) {
+            if (b.Type === 'WordBoundary') words.push({ t: b.Data.Offset / 1e7, d: b.Data.Duration / 1e7 });
+          }
+        } catch (e) {}
+      });
+      audioStream.on('end', () => { out.end(); out.on('finish', () => resolve(words)); });
+      audioStream.on('error', reject);
+    })().catch(reject);
+  });
+}
+
+const CONTENT_PATH = process.argv[2];
+if (!CONTENT_PATH) { console.error('Usage: node render_video.js <content.json>'); process.exit(1); }
+const C = JSON.parse(fs.readFileSync(CONTENT_PATH, 'utf8'));
+
+const EL_KEY = process.env.ELEVENLABS_KEY || 'sk_ed0e31dc67c9cd84597b4fcd74e3a9265a1a2f5ce2d3fbf7';
+const PIXABAY_KEY = process.env.PIXABAY_KEY || '56592495-3cd45b015bad6e813ce9ff19a';
+const VOICE = C.voice || 'en-US-ChristopherNeural';    // free Edge neural voice, deep & authoritative
+let TOTAL = 60.0;                                       // video length (seconds); set adaptively below
+const W = 1080, H = 1920, FPS = 30;
+
+const OUT_DIR = C.outDir;
+if (!OUT_DIR) { console.error('content.json needs "outDir"'); process.exit(1); }
+const WORK = path.join(OUT_DIR, '.work');
+
+// ---- locate ffmpeg / ffprobe ----
+function findBin(name) {
+  try { execFileSync(name, ['-version'], { stdio: 'ignore' }); return name; } catch (e) {}
+  const roots = [
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft/WinGet/Packages') : null,
+    'C:/Program Files', 'C:/ffmpeg',
+  ].filter(Boolean);
+  for (const r of roots) {
+    let found = null;
+    (function walk(d, depth) {
+      if (found || depth > 5 || !fs.existsSync(d)) return;
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        if (found) return;
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) walk(p, depth + 1);
+        else if (e.name.toLowerCase() === name + '.exe') found = p;
+      }
+    })(r, 0);
+    if (found) return found;
+  }
+  throw new Error('Could not find ' + name);
+}
+const FFMPEG = findBin('ffmpeg');
+const FFPROBE = findBin('ffprobe');
+
+// ---- tiny http helpers ----
+function reqJSON(opts, bodyBuf) {
+  return new Promise((resolve, reject) => {
+    const r = https.request(opts, (res) => {
+      let d = [];
+      res.on('data', (c) => d.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(d) }));
+    });
+    r.on('error', reject);
+    if (bodyBuf) r.write(bodyBuf);
+    r.end();
+  });
+}
+function getBuf(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return getBuf(res.headers.location).then(resolve, reject);
+      }
+      let d = [];
+      res.on('data', (c) => d.push(c));
+      res.on('end', () => resolve(Buffer.concat(d)));
+    }).on('error', reject);
+  });
+}
+function ff(args, cwd) { execFileSync(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', ...args], { cwd, stdio: 'inherit' }); }
+function probeDur(file) {
+  const out = execFileSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]).toString().trim();
+  return parseFloat(out);
+}
+function tc(sec) {
+  if (sec < 0) sec = 0;
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = (sec % 60);
+  return `${h}:${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
+}
+
+(async () => {
+  fs.mkdirSync(WORK, { recursive: true });
+  const segs = [...C.segments, C.cta];
+
+  // 1) build full English text + char offsets per segment
+  let offset = 0; const parts = [];
+  segs.forEach((s, i) => { s._cs = offset; s._ce = offset + s.en.length; offset += s.en.length; if (i < segs.length - 1) offset += 1; parts.push(s.en); });
+  const fullText = parts.join(' ');
+
+  // 2) Free Microsoft Edge neural TTS with word boundaries (cached by script text)
+  const textHash = crypto.createHash('md5').update(fullText + '|' + VOICE).digest('hex');
+  const voicePath = path.join(WORK, 'voice.mp3');
+  const timingPath = path.join(WORK, 'timing.json');
+  let words;
+  const cachedTiming = fs.existsSync(voicePath) && fs.existsSync(timingPath) ? JSON.parse(fs.readFileSync(timingPath, 'utf8')) : null;
+  if (cachedTiming && cachedTiming.hash === textHash && cachedTiming.words) {
+    words = cachedTiming.words;
+    console.log('Reusing cached voiceover.');
+  } else {
+    console.log('Generating voiceover (Edge Neural TTS, free)...');
+    words = await edgeTTS(fullText, VOICE, voicePath);
+    fs.writeFileSync(timingPath, JSON.stringify({ hash: textHash, words }));
+  }
+
+  // map each segment to its words -> speech start/end times
+  segs.forEach((s) => { s._wc = s.en.trim().split(/\s+/).filter(Boolean).length; });
+  let _wi = 0;
+  segs.forEach((s) => {
+    const start = words[Math.min(_wi, words.length - 1)];
+    const end = words[Math.min(_wi + s._wc - 1, words.length - 1)];
+    s.tstart = start ? start.t : 0;
+    s.tend = end ? (end.t + end.d) : (s.tstart + 0.8);
+    _wi += s._wc;
+  });
+
+  const voiceDur = probeDur(voicePath);
+  // Adaptive length: end ~2.4s after the narration so there is no dead hold at the
+  // end. Pass "totalSeconds" in the content JSON to force a fixed length instead.
+  TOTAL = C.totalSeconds || Math.round((voiceDur + 2.4) * 100) / 100;
+
+  // contiguous boundaries: clip/subtitle i runs from its start to the NEXT one's start (last -> TOTAL)
+  segs.forEach((s, i) => { s.dstart = (i === 0) ? 0 : s.tstart; s.dend = (i < segs.length - 1) ? segs[i + 1].tstart : TOTAL; });
+
+  console.log(`Voiceover ${voiceDur.toFixed(2)}s; video length ${TOTAL.toFixed(2)}s across ${segs.length} segments.`);
+
+  // 2b) background music bed (bundled asset, no external API needed)
+  const bgPath = path.join(WORK, 'bg.mp3');
+  const bgSrc = C.musicFile || path.join(__dirname, '..', 'assets', 'music_dramatic.mp3');
+  if (fs.existsSync(bgSrc)) { fs.copyFileSync(bgSrc, bgPath); console.log('Using bundled background music.'); }
+  else console.warn('  no bundled music found; video will have no background music');
+
+  // 3) fetch a Pixabay clip per segment, normalize to its exact duration
+  console.log('Fetching clips + building segments...');
+  const listLines = [];
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const dur = Math.max(0.6, s.dend - s.dstart);
+    const seg = path.join(WORK, `seg${String(i).padStart(2, '0')}.mp4`);
+    const keyPath = seg + '.key';
+    const key = s.query + '|' + dur.toFixed(3);
+    listLines.push(`file '${path.basename(seg)}'`);
+    if (fs.existsSync(seg) && fs.existsSync(keyPath) && fs.readFileSync(keyPath, 'utf8') === key) {
+      console.log(`  seg ${i + 1}/${segs.length} cached`);
+      continue;
+    }
+    const api = `https://pixabay.com/api/videos/?key=${PIXABAY_KEY}&q=${encodeURIComponent(s.query)}&per_page=50&safesearch=true`;
+    const data = JSON.parse((await getBuf(api)).toString());
+    const hits = data.hits || [];
+    if (!hits.length) throw new Error('No Pixabay video for: ' + s.query);
+    // pick the hit whose tags best match the query words (most relevant, not just first)
+    const words = s.query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+    let hit = hits[0], bestScore = -1;
+    for (const h of hits) {
+      const tags = (h.tags || '').toLowerCase();
+      const score = words.reduce((a, w) => a + (tags.includes(w) ? 1 : 0), 0);
+      if (score > bestScore) { bestScore = score; hit = h; }
+    }
+    const v = hit.videos.large || hit.videos.medium || hit.videos.small;
+    const raw = path.join(WORK, `raw${i}.mp4`);
+    fs.writeFileSync(raw, await getBuf(v.url));
+    // slow Ken Burns zoom, alternating in / out per clip for variety
+    const bigW = Math.round(W * 1.25), bigH = Math.round(H * 1.25);
+    const zExpr = (i % 2 === 0) ? 'min(1.0+0.0014*on,1.25)' : 'max(1.25-0.0014*on,1.0)';
+    ff(['-stream_loop', '-1', '-i', raw, '-t', dur.toFixed(3),
+      '-vf', `scale=${bigW}:${bigH}:force_original_aspect_ratio=increase,crop=${bigW}:${bigH},` +
+        `zoompan=z='${zExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${W}x${H}:fps=${FPS},setsar=1,format=yuv420p`,
+      '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', seg]);
+    fs.writeFileSync(keyPath, key);
+    console.log(`  seg ${i + 1}/${segs.length} "${s.query}" -> ${dur.toFixed(2)}s`);
+  }
+
+  // 4) concat the silent video track
+  fs.writeFileSync(path.join(WORK, 'list.txt'), listLines.join('\n'));
+  ff(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', 'novoice.mp4'], WORK);
+
+  // 5) subtitles (ASS, Arial Bold) — one entry per segment, timed to the clip changes
+  const ASSETS = path.join(__dirname, '..', 'assets');
+  fs.copyFileSync(path.join(ASSETS, 'logo_circle.png'), path.join(WORK, 'logo_circle.png'));
+  for (const f of ['arialbd.ttf', 'arial.ttf', 'seguiemj.ttf']) { const s = path.join('C:/Windows/Fonts', f); if (fs.existsSync(s)) fs.copyFileSync(s, path.join(WORK, f)); }
+
+  const header = `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${W}
+PlayResY: ${H}
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Def,Arial,68,&H00FFFFFF,&H9EFFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,4,2,5,120,120,0,1
+Style: Brand,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,1,8,0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+  // eye-catching captions: centered, pop-in (fade + scale) on each subtitle
+  // exact screen center (H/2 = 960), \an5 middle anchor, quick fade-in
+  // Clean full-line captions with a quick pop-in. Full-line (not word-by-word)
+  // so libass renders Hebrew bidi correctly and every comma and period lands on
+  // the correct (left / end) side. Each physical line is wrapped in RTL marks.
+  const lead = '{\\an5\\pos(540,960)\\fad(110,50)\\fscx85\\fscy85\\t(0,160,\\fscx100\\fscy100)}';
+  // emoji don't render in color in libass, so strip them from the burned text and
+  // overlay a real color emoji image separately (see the final mux below).
+  const stripEmoji = (t) => t.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').replace(/[ \t]+$/gm, '').trim();
+  const rtl = (t) => stripEmoji(t).split('\n').map((l) => '‫' + l.trim() + '‬').join('\\N');
+  const capEv = segs.map((s) => `Dialogue: 0,${tc(s.dstart)},${tc(s.dend)},Def,,0,0,0,,${lead}${rtl(s.he)}`).join('\n');
+  // color 👇 emoji overlay during the CTA (last segment), if present
+  const ctaSeg = segs[segs.length - 1];
+  const hasPointEmoji = /\u{1F447}/u.test(ctaSeg.he || '');
+  const ctaStart = ctaSeg.dstart;
+  const emojiSize = 74;
+  let emX = 0, emY = 0;
+  if (hasPointEmoji) {
+    fs.copyFileSync(path.join(ASSETS, 'emoji_point_down.png'), path.join(WORK, 'emoji.png'));
+    // place the emoji on the SAME row as the last CTA line, just past its (left/RTL) end
+    const ctaLines = stripEmoji(ctaSeg.he).split('\n');
+    const lastLine = ctaLines[ctaLines.length - 1].trim();
+    const lineH = 84, avgChar = 36;                                  // approx metrics for Arial bold 68
+    const estW = lastLine.length * avgChar;
+    emX = Math.round((540 - estW / 2) - 8 - emojiSize);              // emoji right edge sits just left of the line (RTL end)
+    const lastLineCenterY = 960 + Math.round(((ctaLines.length - 1) / 2) * lineH);
+    emY = lastLineCenterY - Math.round(emojiSize / 2);
+  }
+  // consistent branding: the handle sits under the logo, on screen the whole time
+  const brandEv = `Dialogue: 0,${tc(0)},${tc(TOTAL)},Brand,,0,0,0,,{\\an8\\pos(540,1705)}@charisma.il`;
+  fs.writeFileSync(path.join(WORK, 'subs.ass'), header + brandEv + '\n' + capEv + '\n', 'utf8');
+
+  // 6) final mux: logo watermark + burned captions + color CTA emoji + voice + music
+  console.log('Rendering final video...');
+  const hasBg = fs.existsSync(path.join(WORK, 'bg.mp3'));
+  const inputs = ['-i', 'novoice.mp4', '-i', 'voice.mp3', '-i', 'logo_circle.png'];
+  let audioFc;
+  if (hasBg) {
+    inputs.push('-stream_loop', '-1', '-i', 'bg.mp3');            // input index 3
+    audioFc = '[1:a]apad,volume=1.0[voice];' +
+      `[3:a]loudnorm=I=-28,afade=t=in:st=0:d=2,afade=t=out:st=${(TOTAL - 3).toFixed(2)}:d=3[bg];` +
+      '[voice][bg]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]';
+  } else {
+    audioFc = '[1:a]apad[a]';
+  }
+  let vidFc = '[2:v]scale=175:175[lg];[0:v]drawbox=x=0:y=0:w=iw:h=ih:color=black@0.25:t=fill,ass=subs.ass:fontsdir=.[vs];[vs][lg]overlay=(W-w)/2:1510[vv];';
+  if (hasPointEmoji) {
+    inputs.push('-i', 'emoji.png');                              // index 4 (with bg) or 3
+    const emIdx = hasBg ? 4 : 3;
+    vidFc += `[${emIdx}:v]scale=${emojiSize}:${emojiSize}[em];[vv][em]overlay=${emX}:${emY}:enable='between(t,${ctaStart.toFixed(2)},${TOTAL.toFixed(2)})'[v];`;
+  } else {
+    vidFc += '[vv]null[v];';
+  }
+  ff([...inputs, '-filter_complex', vidFc + audioFc, '-map', '[v]', '-map', '[a]', '-t', String(TOTAL),
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '176k', '-r', String(FPS), 'final.mp4'], WORK);
+
+  const outFile = path.join(OUT_DIR, 'video.mp4');
+  fs.copyFileSync(path.join(WORK, 'final.mp4'), outFile);
+  console.log('DONE -> ' + outFile + ' (' + probeDur(outFile).toFixed(2) + 's)');
+})().catch((e) => { console.error('ERROR', e.message); process.exit(1); });

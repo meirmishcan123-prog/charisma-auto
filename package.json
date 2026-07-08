@@ -1,0 +1,5 @@
+{
+  "name": "charisma-auto",
+  "private": true,
+  "dependencies": { "msedge-tts": "^2.0.6" }
+}
