@@ -89,7 +89,9 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
     console.log('Already ran today (' + today + ') — skipping.'); return;
   }
   const nowMs = Date.now();
-  const future = SLOTS.map((h) => ({ h, dueAt: dueAtFor(h) })).filter((s) => new Date(s.dueAt).getTime() > nowMs + 5 * 60000).slice(0, MAX);
+  const cand = SLOTS.map((h) => ({ h, dueAt: dueAtFor(h) }));
+  // normally only fill slots still ahead today; in dry-run render regardless of clock so it's testable anytime
+  const future = (DRY ? cand : cand.filter((s) => new Date(s.dueAt).getTime() > nowMs + 5 * 60000)).slice(0, MAX);
   console.log('Slots to fill today:', future.map((s) => s.h + ':00').join(', ') || '(none left today)');
   if (!future.length) { console.log('Nothing to schedule.'); return; }
 
