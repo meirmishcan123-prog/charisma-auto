@@ -6,7 +6,7 @@
  *
  * Env: GEMINI_API_KEY, BUFFER_ACCESS_TOKEN, BUFFER_INSTAGRAM_CHANNEL_ID,
  *      BUFFER_TIKTOK_CHANNEL_ID, PIXABAY_KEY, GITHUB_REPOSITORY (owner/repo).
- * Optional: SLOTS="7,9,11,13,15,17,19,21", MAX_VIDEOS, TIKTOK=0 to skip TikTok.
+ * Optional: SLOTS="7,9,11,13,15,17,18,20,21,22", MAX_VIDEOS, TIKTOK=0 to skip TikTok.
  */
 const fs = require('fs');
 const path = require('path');
@@ -20,7 +20,7 @@ const IG = process.env.BUFFER_INSTAGRAM_CHANNEL_ID;
 const TT = process.env.BUFFER_TIKTOK_CHANNEL_ID;
 const PIXABAY = process.env.PIXABAY_KEY;
 const REPO = process.env.GITHUB_REPOSITORY || 'meirmishcan123-prog/charisma-auto';
-const SLOTS = (process.env.SLOTS || '7,9,11,13,15,17,19,21').split(',').map((x) => parseInt(x, 10));
+const SLOTS = (process.env.SLOTS || '7,9,11,13,15,17,18,20,21,22').split(',').map((x) => parseInt(x, 10)); // 10 posts/day, 07:00-22:00
 const MAX = parseInt(process.env.MAX_VIDEOS || '99', 10);
 const DO_TT = process.env.TIKTOK !== '0' && !!TT;
 const DRY = process.env.DRY_RUN === '1'; // render + host, but do NOT schedule/publish

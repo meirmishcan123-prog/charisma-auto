@@ -1,8 +1,8 @@
 name: Daily AI Videos
 
-# Every morning (before 07:00 Israel) generates fresh AI videos and schedules
-# them to Instagram + TikTok via Buffer at 07:00, 09:00, ... 21:00. Runs entirely
-# on GitHub's servers, so it works with your PC off. Free end to end.
+# Every morning (before 07:00 Israel) generates 10 fresh AI videos and schedules
+# them to Instagram + TikTok via Buffer across 07:00-22:00. Runs entirely on
+# GitHub's servers, so it works with your PC off. Free end to end.
 on:
   schedule:
     - cron: '0 3 * * *'   # ~06:00 Israeli summer / 05:00 winter
