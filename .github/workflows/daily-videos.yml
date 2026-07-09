@@ -10,10 +10,14 @@ on:
   # safe no-ops that cover for dropped runs. All fire before ~07:00 Israel so the
   # first slot of the day is still in the future.
   schedule:
-    - cron: '7 3 * * *'    # ~06:07 IDT / 05:07 IST
-    - cron: '37 3 * * *'   # ~06:37 IDT / 05:37 IST
-    - cron: '7 4 * * *'    # ~07:07 IDT / 06:07 IST (backup)
-    - cron: '7 5 * * *'    # ~08:07 IDT / 07:07 IST (winter backup)
+    - cron: '7 3 * * *'    # ~06:07 IDT / 05:07 IST — main morning pass
+    - cron: '37 3 * * *'   # ~06:37 IDT — backup
+    - cron: '7 4 * * *'    # ~07:07 IDT — backup
+    - cron: '7 5 * * *'    # ~08:07 IDT — backup
+    # self-healing passes: slots are file-level idempotent, so these only create
+    # whatever the morning pass missed (e.g. Gemini daily quota resets ~10:00 IL)
+    - cron: '7 8 * * *'    # ~11:07 IDT — heal missing midday/evening slots
+    - cron: '7 13 * * *'   # ~16:07 IDT — heal missing evening slots
   workflow_dispatch:
     inputs:
       max:

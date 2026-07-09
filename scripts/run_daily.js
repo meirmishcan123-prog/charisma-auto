@@ -133,9 +133,9 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
   let ptr = parseInt(fs.readFileSync(STATE, 'utf8').trim(), 10) || 0;
   const today = ilYMD().join('-');
   const LASTP = path.join(ROOT, 'state', 'last_run.txt');
-  if (process.env.FORCE !== '1' && fs.existsSync(LASTP) && fs.readFileSync(LASTP, 'utf8').trim() === today) {
-    console.log('Already ran today (' + today + ') — skipping.'); return;
-  }
+  // NOTE: no daily dedup here anymore — slots are file-level idempotent (a slot whose
+  // video already exists is skipped), so every cron pass safely heals whatever a
+  // previous pass missed (e.g. Gemini quota failures) without double-scheduling.
   const nowMs = Date.now();
   const wd = ilWeekday();
   const cand = [
@@ -149,6 +149,7 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
 
   const stamp = ilYMD().map((n, i) => (i ? String(n + (i === 1 ? 1 : 0)).padStart(2, '0') : n)).join(''); // yyyymmdd-ish
   const made = [];
+  let attempted = 0;
   for (const slot of future) {
     const topic = topics[ptr % topics.length]; ptr++;
     const isTT = slot.plat === 'tt';
@@ -156,6 +157,7 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
     // idempotent re-runs: if this slot's video already exists (committed by an earlier
     // run today), skip it so a backfill dispatch never double-schedules a slot.
     if (fs.existsSync(path.join(VIDEOS, name + '.mp4'))) { console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()} — already made today, skipping ===`); continue; }
+    attempted++;
     try {
       console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()}  topic="${topic}" ===`);
       const script = await genScript(topic);
@@ -178,7 +180,10 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
       fs.rmSync(outDir, { recursive: true, force: true });
     } catch (e) { console.error('  slot failed:', e.message); }
   }
-  if (!made.length) { console.error('No videos produced.'); process.exit(1); }
+  if (!made.length) {
+    if (attempted === 0) { console.log('All slots already made — nothing to do.'); return; }
+    console.error('No videos produced (all attempted slots failed).'); process.exit(1);
+  }
 
   if (DRY) {
     for (const v of made) { const kb = Math.round(fs.statSync(path.join(VIDEOS, v.name + '.mp4')).size / 1024); console.log(`  [DRY_RUN] rendered ${v.name}.mp4 (${kb} KB) — not pushing, not scheduling.`); }
