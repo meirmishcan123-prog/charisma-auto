@@ -56,7 +56,10 @@ const C = JSON.parse(fs.readFileSync(CONTENT_PATH, 'utf8'));
 const EL_KEY = process.env.ELEVENLABS_KEY || 'sk_ed0e31dc67c9cd84597b4fcd74e3a9265a1a2f5ce2d3fbf7';
 const PIXABAY_KEY = process.env.PIXABAY_KEY || '56592495-3cd45b015bad6e813ce9ff19a';
 const VOICE = C.voice || 'en-US-ChristopherNeural';    // free Edge neural voice, deep & authoritative
-let TOTAL = 60.0;                                       // video length (seconds); set adaptively below
+const PITCH = C.pitch || 0.93;                         // <1 = deeper / thicker / more confident, credible voice
+const VIDEO_SECONDS = C.totalSeconds || 60.0;          // every finished video is EXACTLY this long
+const TAIL = 2.2;                                      // seconds of breathing room after the narration ends
+let TOTAL = VIDEO_SECONDS;                             // video length (seconds)
 const W = 1080, H = 1920, FPS = 30;
 
 const OUT_DIR = C.outDir;
@@ -133,8 +136,11 @@ function tc(sec) {
   segs.forEach((s, i) => { s._cs = offset; s._ce = offset + s.en.length; offset += s.en.length; if (i < segs.length - 1) offset += 1; parts.push(s.en); });
   const fullText = parts.join(' ');
 
-  // 2) Free Microsoft Edge neural TTS with word boundaries (cached by script text)
-  const textHash = crypto.createHash('md5').update(fullText + '|' + VOICE).digest('hex');
+  // 2) Free Microsoft Edge neural TTS with word boundaries, then DEEPEN the voice
+  // (pitch down) and stretch/compress it so the finished video is exactly
+  // VIDEO_SECONDS. Cached by script + pitch + target so tweaks re-render cleanly.
+  const TARGET_VOICE = Math.max(20, VIDEO_SECONDS - TAIL);   // the narration fills up to here
+  const textHash = crypto.createHash('md5').update(fullText + '|' + VOICE + '|p' + PITCH + '|t' + TARGET_VOICE).digest('hex');
   const voicePath = path.join(WORK, 'voice.mp3');
   const timingPath = path.join(WORK, 'timing.json');
   let words;
@@ -144,7 +150,17 @@ function tc(sec) {
     console.log('Reusing cached voiceover.');
   } else {
     console.log('Generating voiceover (Edge Neural TTS, free)...');
-    words = await edgeTTS(fullText, VOICE, voicePath);
+    const rawWords = await edgeTTS(fullText, VOICE, voicePath);
+    const rawDur = probeDur(voicePath);
+    // one ffmpeg pass: asetrate lowers pitch (deeper), atempo restores/sets length to TARGET_VOICE
+    const SR = 24000;
+    let tempo = rawDur / (TARGET_VOICE * PITCH);
+    tempo = Math.max(0.5, Math.min(2.0, tempo));
+    const adj = path.join(WORK, 'voice_adj.mp3');
+    ff(['-i', voicePath, '-filter:a', `asetrate=${Math.round(SR * PITCH)},aresample=${SR},atempo=${tempo.toFixed(5)}`, '-ac', '1', adj]);
+    fs.copyFileSync(adj, voicePath);
+    const scale = probeDur(voicePath) / rawDur;               // map word times onto the adjusted audio
+    words = rawWords.map((w) => ({ t: w.t * scale, d: w.d * scale }));
     fs.writeFileSync(timingPath, JSON.stringify({ hash: textHash, words }));
   }
 
@@ -160,14 +176,12 @@ function tc(sec) {
   });
 
   const voiceDur = probeDur(voicePath);
-  // Adaptive length: end ~2.4s after the narration so there is no dead hold at the
-  // end. Pass "totalSeconds" in the content JSON to force a fixed length instead.
-  TOTAL = C.totalSeconds || Math.round((voiceDur + 2.4) * 100) / 100;
+  TOTAL = VIDEO_SECONDS;   // fixed: every finished video is exactly this long
 
   // contiguous boundaries: clip/subtitle i runs from its start to the NEXT one's start (last -> TOTAL)
   segs.forEach((s, i) => { s.dstart = (i === 0) ? 0 : s.tstart; s.dend = (i < segs.length - 1) ? segs[i + 1].tstart : TOTAL; });
 
-  console.log(`Voiceover ${voiceDur.toFixed(2)}s; video length ${TOTAL.toFixed(2)}s across ${segs.length} segments.`);
+  console.log(`Voiceover ${voiceDur.toFixed(2)}s (deepened, pitch ${PITCH}); video length ${TOTAL.toFixed(2)}s across ${segs.length} segments.`);
 
   // 2b) background music bed (bundled asset, no external API needed)
   const bgPath = path.join(WORK, 'bg.mp3');
