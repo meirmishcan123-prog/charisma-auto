@@ -39,7 +39,7 @@ function edgeTTS(text, voice, outPath) {
         try {
           const m = JSON.parse(chunk.toString());
           for (const b of (m.Metadata || [])) {
-            if (b.Type === 'WordBoundary') words.push({ t: b.Data.Offset / 1e7, d: b.Data.Duration / 1e7 });
+            if (b.Type === 'WordBoundary') words.push({ t: b.Data.Offset / 1e7, d: b.Data.Duration / 1e7, w: (b.Data.text && b.Data.text.Text) || '' });
           }
         } catch (e) {}
       });
@@ -140,7 +140,7 @@ function tc(sec) {
   // (pitch down) and stretch/compress it so the finished video is exactly
   // VIDEO_SECONDS. Cached by script + pitch + target so tweaks re-render cleanly.
   const TARGET_VOICE = Math.max(20, VIDEO_SECONDS - TAIL);   // the narration fills up to here
-  const textHash = crypto.createHash('md5').update(fullText + '|' + VOICE + '|p' + PITCH + '|t' + TARGET_VOICE).digest('hex');
+  const textHash = crypto.createHash('md5').update(fullText + '|' + VOICE + '|p' + PITCH + '|t' + TARGET_VOICE + '|v2').digest('hex');
   const voicePath = path.join(WORK, 'voice.mp3');
   const timingPath = path.join(WORK, 'timing.json');
   let words;
@@ -160,19 +160,50 @@ function tc(sec) {
     ff(['-i', voicePath, '-filter:a', `asetrate=${Math.round(SR * PITCH)},aresample=${SR},atempo=${tempo.toFixed(5)}`, '-ac', '1', adj]);
     fs.copyFileSync(adj, voicePath);
     const scale = probeDur(voicePath) / rawDur;               // map word times onto the adjusted audio
-    words = rawWords.map((w) => ({ t: w.t * scale, d: w.d * scale }));
+    words = rawWords.map((w) => ({ t: w.t * scale, d: w.d * scale, w: w.w }));
     fs.writeFileSync(timingPath, JSON.stringify({ hash: textHash, words }));
   }
 
-  // map each segment to its words -> speech start/end times
-  segs.forEach((s) => { s._wc = s.en.trim().split(/\s+/).filter(Boolean).length; });
-  let _wi = 0;
-  segs.forEach((s) => {
-    const start = words[Math.min(_wi, words.length - 1)];
-    const end = words[Math.min(_wi + s._wc - 1, words.length - 1)];
-    s.tstart = start ? start.t : 0;
-    s.tend = end ? (end.t + end.d) : (s.tstart + 0.8);
-    _wi += s._wc;
+  // map each segment to its words -> speech start/end times.
+  // ACCURATE alignment: match each spoken word boundary to the source text word by
+  // word. TTS expands numbers/abbreviations ("5am" -> "five A M", "1%" -> "one
+  // percent"), which adds extra boundaries; those extras are attributed to the
+  // CURRENT segment so every later subtitle still lands exactly on its speech.
+  const normW = (x) => String(x).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const src = [];
+  segs.forEach((s, si) => { s.en.trim().split(/\s+/).filter(Boolean).forEach((w) => src.push({ w: normW(w), si })); });
+  const times = segs.map(() => ({ start: null, end: null }));
+  const mark = (si, b) => { const T = times[si]; const e = b.t + b.d; if (T.start === null || b.t < T.start) T.start = b.t; if (T.end === null || e > T.end) T.end = e; };
+  let sp = 0, matched = 0, haveText = words.some((b) => b.w);
+  if (haveText) {
+    for (const b of words) {
+      const bw = normW(b.w || '');
+      let si = null;
+      if (bw && sp < src.length) {
+        const cur = src[sp].w;
+        if (cur === bw || (cur && bw && (cur.startsWith(bw) || bw.startsWith(cur)))) { si = src[sp].si; sp++; matched++; }
+        else if (sp + 1 < src.length && src[sp + 1].w === bw) { sp++; si = src[sp].si; sp++; matched++; } // TTS skipped a token
+      }
+      if (si === null) si = sp > 0 ? src[Math.min(sp, src.length) - 1].si : 0;   // expansion word -> current segment
+      mark(si, b);
+    }
+    console.log(`Subtitle sync: matched ${matched}/${src.length} source words to spoken words.`);
+  }
+  if (!haveText || matched < src.length * 0.6) {
+    // fallback (old cache without word text): plain word-count mapping
+    console.log('Subtitle sync: falling back to word-count mapping.');
+    let _wi = 0;
+    segs.forEach((s, i) => {
+      const wc = s.en.trim().split(/\s+/).filter(Boolean).length;
+      const start = words[Math.min(_wi, words.length - 1)];
+      const end = words[Math.min(_wi + wc - 1, words.length - 1)];
+      times[i] = { start: start ? start.t : 0, end: end ? (end.t + end.d) : null };
+      _wi += wc;
+    });
+  }
+  segs.forEach((s, i) => {
+    s.tstart = times[i].start !== null ? times[i].start : (i ? segs[i - 1].tend : 0);
+    s.tend = times[i].end !== null ? times[i].end : s.tstart + 0.8;
   });
 
   const voiceDur = probeDur(voicePath);
@@ -182,6 +213,9 @@ function tc(sec) {
   segs.forEach((s, i) => { s.dstart = (i === 0) ? 0 : s.tstart; s.dend = (i < segs.length - 1) ? segs[i + 1].tstart : TOTAL; });
 
   console.log(`Voiceover ${voiceDur.toFixed(2)}s (deepened, pitch ${PITCH}); video length ${TOTAL.toFixed(2)}s across ${segs.length} segments.`);
+  const lastSpoken = Math.max(...segs.map((s) => s.tend));
+  if (lastSpoken > TOTAL - 0.3) console.warn(`WARNING: narration ends at ${lastSpoken.toFixed(2)}s — too close to the ${TOTAL}s cut!`);
+  else console.log(`Narration ends at ${lastSpoken.toFixed(2)}s — nothing is cut.`);
 
   // 2b) background music bed (bundled asset, no external API needed)
   const bgPath = path.join(WORK, 'bg.mp3');
