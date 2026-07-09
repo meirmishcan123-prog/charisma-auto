@@ -24,7 +24,19 @@ const SLOTS = (process.env.SLOTS || '7,9,11,13,15,17,18,20,21,22').split(',').ma
 const MAX = parseInt(process.env.MAX_VIDEOS || '99', 10);
 const DO_TT = process.env.TIKTOK !== '0' && !!TT;
 const DRY = process.env.DRY_RUN === '1'; // render + host, but do NOT schedule/publish
-const KEEP = 24; // how many recent videos to keep hosted
+const KEEP = 24; // how many recent videos to keep hosted (per platform)
+
+// Same video for both platforms, ONLY the end CTA differs.
+// Instagram keeps the "comment אני" CTA (Gemini's cta.he already ends with the fixed lines).
+// TikTok drives followers to the bio link (selling the 30-day self-discipline guide).
+const TT_CTA_HE = 'כנסו לקישור שבביו,\nוקבלו את המדריך המוביל בישראל\nלפיתוח משמעת עצמית תוך 30 יום 👇';
+const TT_CTA_EN = [
+  "Tap the link in my bio to get the number one guide for real self discipline.",
+  "The link in my bio has Israel's top guide to build self discipline in thirty days.",
+  "Go to the link in my bio and start building unstoppable self discipline today.",
+];
+const TT_CAPTION = 'הקישור בביו שלנו 👆\nהמדריך המוביל בישראל לפיתוח\nמשמעת עצמית תוך 30 יום.\n\n#משמעת_עצמית #מוטיבציה #התפתחות_אישית';
+const IG_HASHTAGS = '#מוטיבציה #משמעת_עצמית #התפתחות_אישית';
 
 for (const [k, v] of Object.entries({ GEMINI_API_KEY: GEMINI, BUFFER_ACCESS_TOKEN: BUFFER, BUFFER_INSTAGRAM_CHANNEL_ID: IG, PIXABAY_KEY: PIXABAY }))
   if (!v) { console.error('Missing env ' + k); process.exit(1); }
@@ -114,28 +126,35 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
       const script = await genScript(topic);
       const outDir = path.join(ROOT, '.work', name);
       fs.rmSync(outDir, { recursive: true, force: true }); fs.mkdirSync(outDir, { recursive: true });
-      script.outDir = outDir.replace(/\\/g, '/'); script.pixabayKey = PIXABAY;
-      script.seed = name + '-' + Date.now();                                 // unique per video
-      script.usedClipsFile = path.join(ROOT, 'state', 'used_clips.json');    // shared memory of recent clips
-      fs.writeFileSync(path.join(outDir, 'content.json'), JSON.stringify(script), 'utf8');
-      execFileSync('node', [RENDER, path.join(outDir, 'content.json')], { stdio: 'inherit' });
-      const outVid = path.join(VIDEOS, name + '.mp4');
-      execFileSync(FF, ['-y', '-hide_banner', '-loglevel', 'error', '-i', path.join(outDir, 'video.mp4'), '-c:v', 'libx264', '-crf', '26', '-maxrate', '2500k', '-bufsize', '5000k', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', outVid]);
+      const seed = name + '-' + Date.now();
+      const base = { outDir: outDir.replace(/\\/g, '/'), pixabayKey: PIXABAY, voice: script.voice, segments: script.segments, seed };
+      const cj = path.join(outDir, 'content.json');
+      const compress = (dst) => execFileSync(FF, ['-y', '-hide_banner', '-loglevel', 'error', '-i', path.join(outDir, 'video.mp4'), '-c:v', 'libx264', '-crf', '26', '-maxrate', '2500k', '-bufsize', '5000k', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', dst]);
+      // 1) Instagram version — CTA = comment "אני". Records the clips it used.
+      fs.writeFileSync(cj, JSON.stringify({ ...base, cta: script.cta, usedClipsFile: path.join(ROOT, 'state', 'used_clips.json') }), 'utf8');
+      execFileSync('node', [RENDER, cj], { stdio: 'inherit' });
+      compress(path.join(VIDEOS, name + '-ig.mp4'));
+      // 2) TikTok version — SAME outDir so the body clips are reused from cache (identical
+      // video); only the voice + the last CTA slide change (link in bio).
+      const ttCta = { en: TT_CTA_EN[ptr % TT_CTA_EN.length], he: TT_CTA_HE, query: script.cta.query };
+      fs.writeFileSync(cj, JSON.stringify({ ...base, cta: ttCta }), 'utf8');
+      execFileSync('node', [RENDER, cj], { stdio: 'inherit' });
+      compress(path.join(VIDEOS, name + '-tt.mp4'));
       const title = topic.length > 60 ? topic.slice(0, 57) + '...' : topic;
-      made.push({ name, dueAt: slot.dueAt, caption: `${script.cta.he}\n\n#מוטיבציה #משמעת_עצמית #התפתחות_אישית`, title });
+      made.push({ name, dueAt: slot.dueAt, title, igCaption: `${script.cta.he}\n\n${IG_HASHTAGS}`, ttCaption: TT_CAPTION });
       fs.rmSync(outDir, { recursive: true, force: true });
     } catch (e) { console.error('  slot failed:', e.message); }
   }
   if (!made.length) { console.error('No videos produced.'); process.exit(1); }
 
   if (DRY) {
-    for (const v of made) { const p = path.join(VIDEOS, v.name + '.mp4'); const kb = Math.round(fs.statSync(p).size / 1024); console.log(`  [DRY_RUN] rendered ${v.name}.mp4 (${kb} KB) — not pushing, not scheduling.`); }
-    console.log('\nDRY RUN OK — rendering works. ' + made.length + ' video(s) produced.'); return;
+    for (const v of made) { const kb = Math.round((fs.statSync(path.join(VIDEOS, v.name + '-ig.mp4')).size + fs.statSync(path.join(VIDEOS, v.name + '-tt.mp4')).size) / 1024); console.log(`  [DRY_RUN] rendered ${v.name} IG+TT (${kb} KB) — not pushing, not scheduling.`); }
+    console.log('\nDRY RUN OK — rendering works. ' + made.length + ' video(s) x2 (IG+TikTok) produced.'); return;
   }
 
-  // prune old videos (keep the most recent KEEP)
+  // prune old videos (keep the most recent KEEP posts = KEEP*2 files)
   const all = fs.readdirSync(VIDEOS).filter((f) => f.endsWith('.mp4')).sort();
-  for (const f of all.slice(0, Math.max(0, all.length - KEEP))) fs.rmSync(path.join(VIDEOS, f));
+  for (const f of all.slice(0, Math.max(0, all.length - KEEP * 2))) fs.rmSync(path.join(VIDEOS, f));
 
   // commit + push all new videos so their raw URLs go live
   fs.writeFileSync(STATE, String(ptr) + '\n');
@@ -144,16 +163,27 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
   execFileSync('git', ['config', 'user.email', 'bot@users.noreply.github.com']);
   execFileSync('git', ['add', '-A'], { cwd: ROOT });
   execFileSync('git', ['commit', '-m', 'daily videos ' + stamp], { cwd: ROOT });
-  execFileSync('git', ['push'], { cwd: ROOT });
+  // resilient push: if the remote moved (a concurrent commit), rebase and retry so we
+  // never abort before scheduling (this is exactly what broke on 2026-07-09).
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try { execFileSync('git', ['push'], { cwd: ROOT, stdio: 'inherit' }); break; }
+    catch (e) {
+      if (attempt === 5) throw e;
+      console.log('  push rejected — pulling --rebase and retrying...');
+      try { execFileSync('git', ['pull', '--rebase', 'origin', 'main'], { cwd: ROOT, stdio: 'inherit' }); } catch (e2) {}
+      await sleep(2000);
+    }
+  }
 
-  // schedule each (wait for its raw URL to be live)
+  // schedule each: the -ig video to Instagram (comment CTA), the -tt video to TikTok (bio-link CTA)
+  const waitReady = async (u) => { for (let i = 0; i < 20; i++) { if (await urlReady(u)) return true; await sleep(3000); } return false; };
   for (const v of made) {
-    const url = `https://raw.githubusercontent.com/${REPO}/main/videos/${v.name}.mp4`;
-    let ready = false; for (let i = 0; i < 20 && !ready; i++) { ready = await urlReady(url); if (!ready) await sleep(3000); }
-    console.log(`\nScheduling ${v.name} @ ${v.dueAt}  (url ready: ${ready})`);
-    if (DRY) { console.log('  [DRY_RUN] not scheduling/publishing.'); continue; }
-    const ig = await schedule(IG, url, v.dueAt, v.caption, false, v.title); console.log('  IG:', ig.slice(0, 200));
-    if (DO_TT) { const tt = await schedule(TT, url, v.dueAt, v.caption, true, v.title); console.log('  TT:', tt.slice(0, 200)); }
+    const igUrl = `https://raw.githubusercontent.com/${REPO}/main/videos/${v.name}-ig.mp4`;
+    const ttUrl = `https://raw.githubusercontent.com/${REPO}/main/videos/${v.name}-tt.mp4`;
+    console.log(`\nScheduling ${v.name} @ ${v.dueAt}`);
+    await waitReady(igUrl);
+    const ig = await schedule(IG, igUrl, v.dueAt, v.igCaption, false, v.title); console.log('  IG:', ig.slice(0, 200));
+    if (DO_TT) { await waitReady(ttUrl); const tt = await schedule(TT, ttUrl, v.dueAt, v.ttCaption, true, v.title); console.log('  TT:', tt.slice(0, 200)); }
   }
   console.log('\nALL DONE — scheduled ' + made.length + ' videos.');
 })().catch((e) => { console.error('FATAL', e.message); process.exit(1); });
