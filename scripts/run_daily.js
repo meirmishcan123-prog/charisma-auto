@@ -29,7 +29,8 @@ const KEEP = 24; // how many recent videos to keep hosted (per platform)
 // Same video for both platforms, ONLY the end CTA differs.
 // Instagram keeps the "comment אני" CTA (Gemini's cta.he already ends with the fixed lines).
 // TikTok drives followers to the bio link (selling the 30-day self-discipline guide).
-const TT_CTA_HE = 'כנסו לקישור שבביו,\nוקבלו את המדריך המוביל בישראל\nלפיתוח משמעת עצמית תוך 30 יום 👇';
+// keep the LAST line short so the inline 👇 stays on screen
+const TT_CTA_HE = 'כנסו לקישור שבביו,\nוקבלו את המדריך המוביל\nבישראל לפיתוח משמעת\nעצמית תוך 30 יום 👇';
 const TT_CTA_EN = [
   "Tap the link in my bio to get the number one guide for real self discipline.",
   "The link in my bio has Israel's top guide to build self discipline in thirty days.",
@@ -186,4 +187,5 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
     if (DO_TT) { await waitReady(ttUrl); const tt = await schedule(TT, ttUrl, v.dueAt, v.ttCaption, true, v.title); console.log('  TT:', tt.slice(0, 200)); }
   }
   console.log('\nALL DONE — scheduled ' + made.length + ' videos.');
+  process.exit(0); // exit cleanly so the runner step doesn't hang on open sockets
 })().catch((e) => { console.error('FATAL', e.message); process.exit(1); });
