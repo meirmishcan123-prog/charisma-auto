@@ -4,9 +4,16 @@ name: Daily AI Videos
 # them to Instagram + TikTok via Buffer across 07:00-22:00. Runs entirely on
 # GitHub's servers, so it works with your PC off. Free end to end.
 on:
+  # Redundant triggers at odd minutes — GitHub silently drops many :00 top-of-hour
+  # scheduled jobs (that is why nothing ran on 2026-07-09). The once-per-day dedup
+  # (state/last_run.txt) means only the first that lands generates; the rest are
+  # safe no-ops that cover for dropped runs. All fire before ~07:00 Israel so the
+  # first slot of the day is still in the future.
   schedule:
-    - cron: '0 3 * * *'   # ~06:00 Israeli summer / 05:00 winter
-    - cron: '0 4 * * *'   # ~07:00 Israeli summer / 06:00 winter (backup)
+    - cron: '7 3 * * *'    # ~06:07 IDT / 05:07 IST
+    - cron: '37 3 * * *'   # ~06:37 IDT / 05:37 IST
+    - cron: '7 4 * * *'    # ~07:07 IDT / 06:07 IST (backup)
+    - cron: '7 5 * * *'    # ~08:07 IDT / 07:07 IST (winter backup)
   workflow_dispatch:
     inputs:
       max:
