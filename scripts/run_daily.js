@@ -84,16 +84,22 @@ RULES:
   Vary the spoken "cta.en" wording. cta.query = an inspiring nature scene (e.g. sunrise over mountains, grand waterfall, calm lake at dawn, aerial forest) — vary it each time.
 - Keep it TIGHT: ~110-125 total English words so the voice is ~52-56s. Valid JSON only.`;
   const body = JSON.stringify({ contents: [{ parts: [{ text: PROMPT }] }], generationConfig: { responseMimeType: 'application/json', temperature: 1.05, maxOutputTokens: 8192 } });
-  // Gemini occasionally returns truncated / rate-limited output — retry a few times.
+  // Gemini occasionally returns truncated output or rate-limits (429). On 429 the
+  // free tier needs a real cool-down, so wait ~65s before retrying.
   let lastErr;
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  for (let attempt = 1; attempt <= 5; attempt++) {
     try {
       const r = await req({ hostname: 'generativelanguage.googleapis.com', path: `/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI}`, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, body);
       if (r.status !== 200) throw new Error('Gemini ' + r.status + ': ' + r.body.slice(0, 200));
       const script = JSON.parse(JSON.parse(r.body).candidates[0].content.parts[0].text);
       if (!script.segments || !script.segments.length || !script.cta) throw new Error('script missing segments/cta');
       return script;
-    } catch (e) { lastErr = e; console.log(`  genScript attempt ${attempt} failed: ${e.message} — retrying...`); await sleep(2500 * attempt); }
+    } catch (e) {
+      lastErr = e;
+      const wait = /429/.test(e.message) ? 65000 : 2500 * attempt;
+      console.log(`  genScript attempt ${attempt} failed: ${e.message.slice(0, 80)} — waiting ${Math.round(wait / 1000)}s...`);
+      await sleep(wait);
+    }
   }
   throw lastErr;
 }
@@ -147,6 +153,9 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
     const topic = topics[ptr % topics.length]; ptr++;
     const isTT = slot.plat === 'tt';
     const name = `v-${stamp}-${slot.h}-${slot.plat}`;
+    // idempotent re-runs: if this slot's video already exists (committed by an earlier
+    // run today), skip it so a backfill dispatch never double-schedules a slot.
+    if (fs.existsSync(path.join(VIDEOS, name + '.mp4'))) { console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()} — already made today, skipping ===`); continue; }
     try {
       console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()}  topic="${topic}" ===`);
       const script = await genScript(topic);
