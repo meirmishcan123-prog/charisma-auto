@@ -20,7 +20,26 @@ const IG = process.env.BUFFER_INSTAGRAM_CHANNEL_ID;
 const TT = process.env.BUFFER_TIKTOK_CHANNEL_ID;
 const PIXABAY = process.env.PIXABAY_KEY;
 const REPO = process.env.GITHUB_REPOSITORY || 'meirmishcan123-prog/charisma-auto';
-const SLOTS = (process.env.SLOTS || '7,9,11,13,15,17,18,20,21,22').split(',').map((x) => parseInt(x, 10)); // 10 posts/day, 07:00-22:00
+// Per-platform posting hours by Israel weekday (0=Sunday .. 6=Saturday) — the
+// user's engagement-optimized schedule. Ranges were expanded to one video per hour.
+const TT_SCHED = {
+  0: [9, 13],               // Sunday
+  1: [11, 13],              // Monday
+  2: [7, 22],               // Tuesday
+  3: [21, 22],              // Wednesday
+  4: [13, 22],              // Thursday
+  5: [18, 20, 21, 22],      // Friday
+  6: [15, 16, 17, 21, 22, 23], // Saturday + motzash (strongest window)
+};
+const IG_SCHED = {
+  0: [12, 19],              // Sunday
+  1: [15, 19],              // Monday
+  2: [12, 18, 19, 20],      // Tuesday (strongest day)
+  3: [8, 9, 19],            // Wednesday
+  4: [12, 18],              // Thursday
+  5: [11, 12, 13],          // Friday (before Shabbat)
+  6: [],                    // Saturday — no Instagram posts
+};
 const MAX = parseInt(process.env.MAX_VIDEOS || '99', 10);
 const DO_TT = process.env.TIKTOK !== '0' && !!TT;
 const DRY = process.env.DRY_RUN === '1'; // render + host, but do NOT schedule/publish
@@ -95,6 +114,7 @@ function urlReady(u) {
 // timezone-correct slot times for TODAY in Israel
 function ilOffsetMin() { const d = new Date(); return Math.round((new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })) - d) / 60000); }
 function ilYMD() { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })); return [d.getFullYear(), d.getMonth(), d.getDate()]; }
+function ilWeekday() { return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })).getDay(); }
 function dueAtFor(hour) { const [y, m, day] = ilYMD(); return new Date(Date.UTC(y, m, day, hour, 0, 0) - ilOffsetMin() * 60000).toISOString(); }
 
 const FF = 'ffmpeg';
@@ -111,46 +131,49 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
     console.log('Already ran today (' + today + ') — skipping.'); return;
   }
   const nowMs = Date.now();
-  const cand = SLOTS.map((h) => ({ h, dueAt: dueAtFor(h) }));
+  const wd = ilWeekday();
+  const cand = [
+    ...(IG_SCHED[wd] || []).map((h) => ({ h, plat: 'ig' })),
+    ...(DO_TT ? (TT_SCHED[wd] || []) : []).map((h) => ({ h, plat: 'tt' })),
+  ].map((s) => ({ ...s, dueAt: dueAtFor(s.h) })).sort((a, b) => a.h - b.h);
   // normally only fill slots still ahead today; in dry-run render regardless of clock so it's testable anytime
   const future = (DRY ? cand : cand.filter((s) => new Date(s.dueAt).getTime() > nowMs + 5 * 60000)).slice(0, MAX);
-  console.log('Slots to fill today:', future.map((s) => s.h + ':00').join(', ') || '(none left today)');
+  console.log(`Weekday ${wd} — slots to fill today:`, future.map((s) => s.h + ':00 ' + s.plat.toUpperCase()).join(', ') || '(none left today)');
   if (!future.length) { console.log('Nothing to schedule.'); return; }
 
   const stamp = ilYMD().map((n, i) => (i ? String(n + (i === 1 ? 1 : 0)).padStart(2, '0') : n)).join(''); // yyyymmdd-ish
   const made = [];
   for (const slot of future) {
     const topic = topics[ptr % topics.length]; ptr++;
-    const name = `v-${stamp}-${slot.h}`;
+    const isTT = slot.plat === 'tt';
+    const name = `v-${stamp}-${slot.h}-${slot.plat}`;
     try {
-      console.log(`\n=== ${slot.h}:00  topic="${topic}" ===`);
+      console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()}  topic="${topic}" ===`);
       const script = await genScript(topic);
       const outDir = path.join(ROOT, '.work', name);
       fs.rmSync(outDir, { recursive: true, force: true }); fs.mkdirSync(outDir, { recursive: true });
-      const seed = name + '-' + Date.now();
-      const base = { outDir: outDir.replace(/\\/g, '/'), pixabayKey: PIXABAY, voice: script.voice, segments: script.segments, seed };
+      // each slot is its own fresh video with the platform's CTA:
+      // Instagram = comment "אני"; TikTok = link in bio (sells the 30-day guide)
+      const cta = isTT ? { en: TT_CTA_EN[ptr % TT_CTA_EN.length], he: TT_CTA_HE, query: script.cta.query } : script.cta;
+      const content = {
+        outDir: outDir.replace(/\\/g, '/'), pixabayKey: PIXABAY, voice: script.voice,
+        segments: script.segments, cta, seed: name + '-' + Date.now(),
+        usedClipsFile: path.join(ROOT, 'state', 'used_clips.json'),
+      };
       const cj = path.join(outDir, 'content.json');
-      const compress = (dst) => execFileSync(FF, ['-y', '-hide_banner', '-loglevel', 'error', '-i', path.join(outDir, 'video.mp4'), '-c:v', 'libx264', '-crf', '26', '-maxrate', '2500k', '-bufsize', '5000k', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', dst]);
-      // 1) Instagram version — CTA = comment "אני". Records the clips it used.
-      fs.writeFileSync(cj, JSON.stringify({ ...base, cta: script.cta, usedClipsFile: path.join(ROOT, 'state', 'used_clips.json') }), 'utf8');
+      fs.writeFileSync(cj, JSON.stringify(content), 'utf8');
       execFileSync('node', [RENDER, cj], { stdio: 'inherit' });
-      compress(path.join(VIDEOS, name + '-ig.mp4'));
-      // 2) TikTok version — SAME outDir so the body clips are reused from cache (identical
-      // video); only the voice + the last CTA slide change (link in bio).
-      const ttCta = { en: TT_CTA_EN[ptr % TT_CTA_EN.length], he: TT_CTA_HE, query: script.cta.query };
-      fs.writeFileSync(cj, JSON.stringify({ ...base, cta: ttCta }), 'utf8');
-      execFileSync('node', [RENDER, cj], { stdio: 'inherit' });
-      compress(path.join(VIDEOS, name + '-tt.mp4'));
+      execFileSync(FF, ['-y', '-hide_banner', '-loglevel', 'error', '-i', path.join(outDir, 'video.mp4'), '-c:v', 'libx264', '-crf', '26', '-maxrate', '2500k', '-bufsize', '5000k', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', path.join(VIDEOS, name + '.mp4')]);
       const title = topic.length > 60 ? topic.slice(0, 57) + '...' : topic;
-      made.push({ name, dueAt: slot.dueAt, title, igCaption: `${script.cta.he}\n\n${IG_HASHTAGS}`, ttCaption: TT_CAPTION });
+      made.push({ name, dueAt: slot.dueAt, plat: slot.plat, title, caption: isTT ? TT_CAPTION : `${script.cta.he}\n\n${IG_HASHTAGS}` });
       fs.rmSync(outDir, { recursive: true, force: true });
     } catch (e) { console.error('  slot failed:', e.message); }
   }
   if (!made.length) { console.error('No videos produced.'); process.exit(1); }
 
   if (DRY) {
-    for (const v of made) { const kb = Math.round((fs.statSync(path.join(VIDEOS, v.name + '-ig.mp4')).size + fs.statSync(path.join(VIDEOS, v.name + '-tt.mp4')).size) / 1024); console.log(`  [DRY_RUN] rendered ${v.name} IG+TT (${kb} KB) — not pushing, not scheduling.`); }
-    console.log('\nDRY RUN OK — rendering works. ' + made.length + ' video(s) x2 (IG+TikTok) produced.'); return;
+    for (const v of made) { const kb = Math.round(fs.statSync(path.join(VIDEOS, v.name + '.mp4')).size / 1024); console.log(`  [DRY_RUN] rendered ${v.name}.mp4 (${kb} KB) — not pushing, not scheduling.`); }
+    console.log('\nDRY RUN OK — rendering works. ' + made.length + ' video(s) produced.'); return;
   }
 
   // prune old videos (keep the most recent KEEP posts = KEEP*2 files)
@@ -176,15 +199,14 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
     }
   }
 
-  // schedule each: the -ig video to Instagram (comment CTA), the -tt video to TikTok (bio-link CTA)
+  // schedule each video to its own platform at its own hour
   const waitReady = async (u) => { for (let i = 0; i < 20; i++) { if (await urlReady(u)) return true; await sleep(3000); } return false; };
   for (const v of made) {
-    const igUrl = `https://raw.githubusercontent.com/${REPO}/main/videos/${v.name}-ig.mp4`;
-    const ttUrl = `https://raw.githubusercontent.com/${REPO}/main/videos/${v.name}-tt.mp4`;
+    const url = `https://raw.githubusercontent.com/${REPO}/main/videos/${v.name}.mp4`;
     console.log(`\nScheduling ${v.name} @ ${v.dueAt}`);
-    await waitReady(igUrl);
-    const ig = await schedule(IG, igUrl, v.dueAt, v.igCaption, false, v.title); console.log('  IG:', ig.slice(0, 200));
-    if (DO_TT) { await waitReady(ttUrl); const tt = await schedule(TT, ttUrl, v.dueAt, v.ttCaption, true, v.title); console.log('  TT:', tt.slice(0, 200)); }
+    await waitReady(url);
+    const r = await schedule(v.plat === 'tt' ? TT : IG, url, v.dueAt, v.caption, v.plat === 'tt', v.title);
+    console.log(`  ${v.plat.toUpperCase()}:`, r.slice(0, 200));
   }
   console.log('\nALL DONE — scheduled ' + made.length + ' videos.');
   process.exit(0); // exit cleanly so the runner step doesn't hang on open sockets
