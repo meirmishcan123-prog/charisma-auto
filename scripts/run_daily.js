@@ -51,18 +51,18 @@ function req(opts, body) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function genScript(topic) {
-  const PROMPT = `You are a scriptwriter for the Hebrew Instagram/TikTok page @charisma.il (charisma, self-discipline, personal development). Write ONE ~55 second vertical video script about: "${topic}".
+  const PROMPT = `You are a top scriptwriter for the Hebrew Instagram/TikTok page @charisma.il (charisma, self-discipline, personal development). Write ONE ~55 second vertical video script about: "${topic}" that feels like a calm, cinematic, deep motivational reel.
 Return ONLY JSON: { "voice":"en-US-ChristopherNeural", "segments":[{"en","he","query"}...], "cta":{"en","he","query"} }
 RULES:
-- 12-13 segments. "en"=short spoken English sentence (7-10 words). "he"=short natural Hebrew subtitle, simple 3rd-grade Hebrew, NO em dash, NO jargon. "query"=2-4 concrete English words for a matching Pixabay stock VIDEO (real visual things: people, city, nature, sunrise, ocean, gym, desk; avoid abstract).
-- Segments 1-2 = HOOK: stop the scroll, open a curiosity gap, fresh & specific to the topic (a myth to bust / a bold counter-intuitive claim / a "why do some people..." question). Do NOT start with "Most people think".
-- Middle = practical useful value, one idea per line.
-- The LAST 2 segments = a FEAR beat (regret / being left behind) then a JEALOUSY beat (others already started and are winning).
+- 12-13 segments. "en"=short spoken English sentence (7-10 words). "he"=short natural Hebrew subtitle, simple 3rd-grade Hebrew, NO em dash, NO jargon.
+- CONTENT QUALITY (make it genuinely interesting, not generic): the HOOK (segments 1-2) must stop the scroll with a specific, fresh, counter-intuitive angle (a myth to bust, a surprising fact, a bold claim, or a "why do some people..." question). Do NOT start with "Most people think". The MIDDLE gives real, concrete, useful value: one sharp idea per line, specific and vivid, no filler and no repeating the same idea. Where it fits, gently tie the message to the calm nature imagery (a river that never stops, a mountain built slowly, still water). End several lines on a punchy thought that sticks.
+- The LAST 2 segments before the CTA = a FEAR beat (regret / being left behind) then a JEALOUSY beat (others already started and are winning).
+- "query" = 2-4 English words for a CINEMATIC NATURE / SCENERY stock video ONLY. Allowed: calm lake, misty mountains, waterfall, flowing river, deep forest, ocean waves, sunrise over mountains, aerial forest, snowy peak, green valley, canyon, autumn woods, starry night sky, northern lights. NEVER people, faces, city, streets, office, gym, desk, phones, or objects. Pick a DIFFERENT scene for every segment so no two clips repeat.
 - "cta.he" MUST end with exactly these 3 lines (keep the newlines and the 👇):
 תגיבו "אני" אם הגעתם עד לכאן,
 וקבלו את המדריך לפיתוח
 משמעת עצמית 👇
-  Vary the spoken "cta.en" wording. cta.query = a fresh inspiring visual that fits THIS topic — pick a DIFFERENT one each time (e.g. city skyline at dawn, runner finishing a race, ocean waves, mountain summit, someone celebrating a win, sunrise over water, busy street). Do not always use sunrise.
+  Vary the spoken "cta.en" wording. cta.query = an inspiring nature scene (e.g. sunrise over mountains, grand waterfall, calm lake at dawn, aerial forest) — vary it each time.
 - Keep it TIGHT: ~110-125 total English words so the voice is ~52-56s. Valid JSON only.`;
   const body = JSON.stringify({ contents: [{ parts: [{ text: PROMPT }] }], generationConfig: { responseMimeType: 'application/json', temperature: 1.05, maxOutputTokens: 8192 } });
   // Gemini occasionally returns truncated / rate-limited output — retry a few times.
