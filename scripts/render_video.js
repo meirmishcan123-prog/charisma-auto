@@ -246,6 +246,23 @@ function tc(sec) {
       console.log(`  seg ${i + 1}/${segs.length} cached`);
       continue;
     }
+    // a segment may bring its OWN clip file (e.g. public-domain Bruce Lee footage);
+    // optional s.slow (e.g. 2) plays it in slow motion, gentle zoom, brighter grade
+    if (s.clip) {
+      const raw = path.join(WORK, `raw${i}.mp4`);
+      fs.copyFileSync(s.clip, raw);
+      const bigW = Math.round(W * 1.1), bigH = Math.round(H * 1.1);
+      const zExpr = (i % 2 === 0) ? 'min(1.0+0.0006*on,1.1)' : 'max(1.1-0.0006*on,1.0)';
+      const gradeFx = C.grade === 'vintage' ? ',eq=contrast=1.1:saturation=0.85,vignette=angle=PI/6' : '';
+      const slowFx = s.slow ? `setpts=${s.slow}*PTS,` : '';
+      ff(['-stream_loop', '-1', '-i', raw, '-t', dur.toFixed(3),
+        '-vf', `${slowFx}scale=${bigW}:${bigH}:force_original_aspect_ratio=increase,crop=${bigW}:${bigH},` +
+          `zoompan=z='${zExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${W}x${H}:fps=${FPS},setsar=1,format=yuv420p${gradeFx}`,
+        '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', seg]);
+      fs.writeFileSync(keyPath, key);
+      console.log(`  seg ${i + 1}/${segs.length} own clip "${path.basename(s.clip)}"${s.slow ? ' slow x' + s.slow : ''} -> ${dur.toFixed(2)}s`);
+      continue;
+    }
     const api = `https://pixabay.com/api/videos/?key=${PIXABAY_KEY}&q=${encodeURIComponent(s.query)}&per_page=50&safesearch=true`;
     const data = JSON.parse((await getBuf(api)).toString());
     const hits = data.hits || [];
@@ -310,7 +327,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   // emoji don't render in color in libass, so strip them from the burned text and
   // overlay a real color emoji image separately (see the final mux below).
   const stripEmoji = (t) => t.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').replace(/[ \t]+$/gm, '').trim();
-  const rtl = (t) => stripEmoji(t).split('\n').map((l) => '‫' + l.trim() + '‬').join('\\N');
+  // attribution lines (start with "- ") render smaller and GOLD, like quote reels
+  const rtl = (t) => stripEmoji(t).split('\n').map((l) => {
+    const line = l.trim();
+    if (line.startsWith('- ')) return '{\\fs46\\c&H8BD9F4&}' + '‫' + line + '‬';
+    return '‫' + line + '‬';
+  }).join('\\N');
   const capEv = segs.map((s) => `Dialogue: 0,${tc(s.dstart)},${tc(s.dend)},Def,,0,0,0,,${lead}${rtl(s.he)}`).join('\n');
   // color 👇 emoji overlay during the CTA (last segment), if present
   const ctaSeg = segs[segs.length - 1];
@@ -338,15 +360,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   const hasBg = fs.existsSync(path.join(WORK, 'bg.mp3'));
   const inputs = ['-i', 'novoice.mp4', '-i', 'voice.mp3', '-i', 'logo_circle.png'];
   let audioFc;
+  // voiceVolume 0 = music-only mode (the silent voice still drives subtitle timing)
+  const VOICE_VOL = C.voiceVolume !== undefined ? C.voiceVolume : 1.0;
+  const BG_LOUD = VOICE_VOL === 0 ? -16 : -28;   // music carries the video when there is no voice
   if (hasBg) {
     inputs.push('-stream_loop', '-1', '-i', 'bg.mp3');            // input index 3
-    audioFc = '[1:a]apad,volume=1.0[voice];' +
-      `[3:a]loudnorm=I=-28,afade=t=in:st=0:d=2,afade=t=out:st=${(TOTAL - 3).toFixed(2)}:d=3[bg];` +
+    audioFc = `[1:a]apad,volume=${VOICE_VOL}[voice];` +
+      `[3:a]loudnorm=I=${BG_LOUD},afade=t=in:st=0:d=2,afade=t=out:st=${(TOTAL - 3).toFixed(2)}:d=3[bg];` +
       '[voice][bg]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]';
   } else {
     audioFc = '[1:a]apad[a]';
   }
-  let vidFc = '[2:v]scale=175:175[lg];[0:v]drawbox=x=0:y=0:w=iw:h=ih:color=black@0.25:t=fill,ass=subs.ass:fontsdir=.[vs];[vs][lg]overlay=(W-w)/2:1510[vv];';
+  const DIM = C.dim !== undefined ? C.dim : 0.25;   // background darkening (lower = brighter)
+  let vidFc = `[2:v]scale=175:175[lg];[0:v]drawbox=x=0:y=0:w=iw:h=ih:color=black@${DIM}:t=fill,ass=subs.ass:fontsdir=.[vs];[vs][lg]overlay=(W-w)/2:1510[vv];`;
   if (hasPointEmoji) {
     inputs.push('-i', 'emoji.png');                              // index 4 (with bg) or 3
     const emIdx = hasBg ? 4 : 3;

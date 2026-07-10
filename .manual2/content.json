@@ -1,0 +1,21 @@
+{
+  "outDir": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/charisma-auto/.manual2",
+  "voice": "en-US-ChristopherNeural",
+  "seed": "bruce-sample-1",
+  "grade": "vintage",
+  "segments": [
+    { "en": "He weighed sixty one kilos, and Hollywood feared him.", "he": "הוא שקל 61 קילו.\nוכל הוליווד פחדה ממנו.", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl01.mp4" },
+    { "en": "His secret was never muscle. It was one rule.", "he": "הסוד שלו לא היה שרירים.\nהיה לו חוק אחד.", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl02.mp4" },
+    { "en": "In nineteen seventy his back broke. Doctors said: finished.", "he": "ב-1970 הגב שלו נשבר.\nהרופאים אמרו: נגמר.", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl03.mp4" },
+    { "en": "He wrote one note: walk on. And kept walking.", "he": "הוא כתב פתק אחד:\n\"תמשיך ללכת\". והמשיך.", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl04.mp4" },
+    { "en": "I fear not the man who practiced ten thousand kicks once.", "he": "\"אני לא מפחד ממי שתרגל\n10,000 בעיטות פעם אחת...\"", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl05.mp4" },
+    { "en": "I fear the man who practiced one kick ten thousand times.", "he": "\"אני מפחד ממי שתרגל בעיטה\nאחת 10,000 פעמים.\"\n- ברוס לי", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl06.mp4" },
+    { "en": "What is defeat? Education. The first step to something better.", "he": "\"מה זו תבוסה? שיעור.\nהצעד הראשון למשהו טוב יותר.\"\n- ברוס לי", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl07.mp4" },
+    { "en": "Empty your mind. Be water, my friend.", "he": "\"רוקן את הראש.\nתהיה כמו מים, חבר שלי.\"\n- ברוס לי", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl08.mp4" },
+    { "en": "So pick one skill. Practice twenty minutes, every day.", "he": "אז קח מיומנות אחת.\nתרגל 20 דקות. כל יום.", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl09.mp4" },
+    { "en": "When it hurts, tell yourself two words: walk on.", "he": "וכשכואב, תגיד לעצמך\nשתי מילים: תמשיך ללכת.", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl10.mp4" },
+    { "en": "One year from now you look back, with pride or regret.", "he": "בעוד שנה תביט אחורה.\nבגאווה, או בחרטה.", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl12.mp4" },
+    { "en": "Someone your age is training right now, in silence.", "he": "מישהו בגילך מתאמן\nממש עכשיו. בשקט.", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl11.mp4" }
+  ],
+  "cta": { "en": "Comment ani if you made it here, and get the self discipline guide.", "he": "תגיבו \"אני\" אם הגעתם עד לכאן,\nוקבלו את המדריך לפיתוח\nמשמעת עצמית 👇", "query": "x", "clip": "C:/Users/2pac4/AppData/Local/Temp/claude/C--Users-2pac4-Charsima/d6dd8d5e-9954-48d9-a787-07896be6d949/scratchpad/bl_clips/bl13.mp4" }
+}
