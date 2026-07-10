@@ -126,11 +126,13 @@ function urlReady(u) {
   return new Promise((res) => { https.request(u, { method: 'HEAD' }, (x) => res(x.statusCode >= 200 && x.statusCode < 400)).on('error', () => res(false)).end(); });
 }
 
-// timezone-correct slot times for TODAY in Israel
+// timezone-correct slot times, with a day offset (0=today, 1=tomorrow, ...)
 function ilOffsetMin() { const d = new Date(); return Math.round((new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })) - d) / 60000); }
 function ilYMD() { const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })); return [d.getFullYear(), d.getMonth(), d.getDate()]; }
 function ilWeekday() { return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })).getDay(); }
-function dueAtFor(hour) { const [y, m, day] = ilYMD(); return new Date(Date.UTC(y, m, day, hour, 0, 0) - ilOffsetMin() * 60000).toISOString(); }
+function dueAtFor(hour, off = 0) { const [y, m, day] = ilYMD(); return new Date(Date.UTC(y, m, day + off, hour, 0, 0) - ilOffsetMin() * 60000).toISOString(); }
+function stampFor(off = 0) { const [y, m, day] = ilYMD(); const d = new Date(Date.UTC(y, m, day + off)); return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`; }
+function wdFor(off = 0) { return (ilWeekday() + off) % 7; }
 
 const FF = 'ffmpeg';
 const RENDER = path.join(ROOT, 'scripts', 'render_video.js');
@@ -146,25 +148,42 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
   // video already exists is skipped), so every cron pass safely heals whatever a
   // previous pass missed (e.g. Gemini quota failures) without double-scheduling.
   const nowMs = Date.now();
-  const wd = ilWeekday();
-  const cand = [
-    ...slotsFor(wd, 'ig'),
-    ...(DO_TT ? slotsFor(wd, 'tt') : []),
-  ].map((s) => ({ ...s, dueAt: dueAtFor(s.h) })).sort((a, b) => a.h - b.h);
-  // fill slots still ahead today, plus slots up to 90 min late (those publish at
-  // now+6min — better late than missed). Dry-run renders regardless of the clock.
+  // FULL SCHEDULE, TWO DAYS AHEAD: build slots for today + the next HORIZON days.
+  // Today's slots publish today; future days' videos are rendered ahead of time and
+  // scheduled into Buffer as queue capacity frees up (free plan ~10 pending/channel).
+  const HORIZON = parseInt(process.env.DAYS_AHEAD || '2', 10);
   const LATE_GRACE = 90 * 60000;
-  const future = (DRY ? cand : cand.filter((s) => new Date(s.dueAt).getTime() > nowMs - LATE_GRACE)).slice(0, MAX);
-  console.log(`Weekday ${wd} — slots to fill today:`, future.map((s) => s.h + ':00 ' + s.plat.toUpperCase() + (s.strong ? '*' : '')).join(', ') || '(none left today)');
+  let cand = [];
+  for (let off = 0; off <= HORIZON; off++) {
+    const wd = wdFor(off);
+    const dayCand = [
+      ...slotsFor(wd, 'ig'),
+      ...(DO_TT ? slotsFor(wd, 'tt') : []),
+    ].map((s) => ({ ...s, off, dueAt: dueAtFor(s.h, off), name: `v-${stampFor(off)}-${s.h}-${s.plat}` }))
+      .sort((a, b) => a.h - b.h);
+    cand = cand.concat(off === 0 && !DRY
+      ? dayCand.filter((s) => new Date(s.dueAt).getTime() > nowMs - LATE_GRACE)
+      : dayCand);
+  }
+  const future = cand.slice(0, DRY ? MAX : cand.length);
+  console.log('Slots (today + ' + HORIZON + ' days):', future.map((s) => `+${s.off}d ${s.h}:00 ${s.plat.toUpperCase()}${s.strong ? '*' : ''}`).join(', ') || '(none)');
   if (!future.length) { console.log('Nothing to schedule.'); return; }
 
-  const stamp = ilYMD().map((n, i) => (i ? String(n + (i === 1 ? 1 : 0)).padStart(2, '0') : n)).join(''); // yyyymmdd-ish
-
-  // prune old videos up front (keep the most recent ~2 days worth)
+  // prune only videos from BEFORE yesterday (future days' videos must survive)
   if (!DRY) {
-    const all = fs.readdirSync(VIDEOS).filter((f) => f.endsWith('.mp4')).sort();
-    for (const f of all.slice(0, Math.max(0, all.length - KEEP * 2))) fs.rmSync(path.join(VIDEOS, f));
+    const cutoff = stampFor(-1);
+    for (const f of fs.readdirSync(VIDEOS).filter((x) => x.endsWith('.mp4'))) {
+      const m = f.match(/^v-(\d{8})-/);
+      if (m && m[1] < cutoff) fs.rmSync(path.join(VIDEOS, f));
+    }
   }
+
+  // which slots were already scheduled into Buffer (survives across runs)
+  const SCHEDP = path.join(ROOT, 'state', 'scheduled.json');
+  let scheduledList = [];
+  try { scheduledList = JSON.parse(fs.readFileSync(SCHEDP, 'utf8')) || []; } catch (e) {}
+  const scheduledSet = new Set(scheduledList);
+  const saveScheduled = () => fs.writeFileSync(SCHEDP, JSON.stringify(scheduledList.slice(-400)));
 
   execFileSync('git', ['config', 'user.name', 'charisma-bot']);
   execFileSync('git', ['config', 'user.email', 'bot@users.noreply.github.com']);
@@ -183,64 +202,86 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
   };
   const waitReady = async (u) => { for (let i = 0; i < 20; i++) { if (await urlReady(u)) return true; await sleep(3000); } return false; };
 
-  // render -> push -> schedule EACH video immediately, so early slots go live while
-  // later ones are still rendering (an entire batch used to schedule only at the end,
-  // which lost early slots whenever the run started late).
-  let madeCount = 0, attempted = 0;
+  // captions saved at render time so later runs can schedule pre-rendered videos
+  const CAPP = path.join(ROOT, 'state', 'captions.json');
+  let captions = {};
+  try { captions = JSON.parse(fs.readFileSync(CAPP, 'utf8')) || {}; } catch (e) {}
+  const FALLBACK_IG = 'תגיבו "אני" אם הגעתם עד לכאן,\nוקבלו את המדריך לפיתוח\nמשמעת עצמית 👇\n\n' + IG_HASHTAGS;
+
+  // render -> push -> schedule EACH video immediately. Pre-rendered future videos are
+  // scheduled as Buffer queue capacity frees (free plan caps pending posts/channel).
+  let madeCount = 0, scheduledCount = 0, attempted = 0;
+  const channelFull = { ig: false, tt: false };
   for (const slot of future) {
-    const topic = topics[ptr % topics.length]; ptr++;
     const isTT = slot.plat === 'tt';
-    const name = `v-${stamp}-${slot.h}-${slot.plat}`;
-    // idempotent re-runs: if this slot's video already exists (committed by an earlier
-    // run today), skip it so a backfill dispatch never double-schedules a slot.
-    if (fs.existsSync(path.join(VIDEOS, name + '.mp4'))) { console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()} — already made today, skipping ===`); continue; }
-    attempted++;
+    const name = slot.name;
+    if (scheduledSet.has(name)) { console.log(`+${slot.off}d ${slot.h}:00 ${slot.plat.toUpperCase()} — already scheduled, skipping`); continue; }
+    const exists = fs.existsSync(path.join(VIDEOS, name + '.mp4'));
+    let caption = captions[name] && captions[name].c;
+    let title = (captions[name] && captions[name].t) || 'self discipline';
+    if (!exists) {
+      if (attempted >= MAX) { console.log(`+${slot.off}d ${slot.h}:00 ${slot.plat.toUpperCase()} — render budget reached, next pass`); continue; }
+      const topic = topics[ptr % topics.length]; ptr++;
+      attempted++;
+      try {
+        console.log(`\n=== +${slot.off}d ${slot.h}:00 ${slot.plat.toUpperCase()}${slot.strong ? ' (peak)' : ''}  topic="${topic}" ===`);
+        const script = await genScript(topic, slot.strong);
+        const outDir = path.join(ROOT, '.work', name);
+        fs.rmSync(outDir, { recursive: true, force: true }); fs.mkdirSync(outDir, { recursive: true });
+        // each slot is its own fresh video with the platform's CTA:
+        // Instagram = comment "אני"; TikTok = link in bio (sells the 30-day guide)
+        const cta = isTT ? { en: TT_CTA_EN[ptr % TT_CTA_EN.length], he: TT_CTA_HE, query: script.cta.query } : script.cta;
+        const content = {
+          outDir: outDir.replace(/\\/g, '/'), pixabayKey: PIXABAY, voice: script.voice,
+          segments: script.segments, cta, seed: name + '-' + Date.now(),
+          usedClipsFile: path.join(ROOT, 'state', 'used_clips.json'),
+        };
+        const cj = path.join(outDir, 'content.json');
+        fs.writeFileSync(cj, JSON.stringify(content), 'utf8');
+        execFileSync('node', [RENDER, cj], { stdio: 'inherit' });
+        execFileSync(FF, ['-y', '-hide_banner', '-loglevel', 'error', '-i', path.join(outDir, 'video.mp4'), '-c:v', 'libx264', '-crf', '26', '-maxrate', '2500k', '-bufsize', '5000k', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', path.join(VIDEOS, name + '.mp4')]);
+        title = topic.length > 60 ? topic.slice(0, 57) + '...' : topic;
+        caption = isTT ? TT_CAPTION : `${script.cta.he}\n\n${IG_HASHTAGS}`;
+        captions[name] = { c: caption, t: title };
+        fs.rmSync(outDir, { recursive: true, force: true });
+        if (DRY) {
+          const kb = Math.round(fs.statSync(path.join(VIDEOS, name + '.mp4')).size / 1024);
+          console.log(`  [DRY_RUN] rendered ${name}.mp4 (${kb} KB) — not pushing, not scheduling.`);
+          madeCount++; continue;
+        }
+        fs.writeFileSync(STATE, String(ptr) + '\n');
+        fs.writeFileSync(LASTP, today + '\n');
+        fs.writeFileSync(CAPP, JSON.stringify(captions));
+        await pushRepo(`video ${name}`);
+        madeCount++;
+      } catch (e) { console.error('  slot failed:', e.message); continue; }
+    }
+    if (DRY || channelFull[slot.plat]) continue;
+    if (!caption) caption = isTT ? TT_CAPTION : FALLBACK_IG;
     try {
-      console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()}${slot.strong ? ' (peak)' : ''}  topic="${topic}" ===`);
-      const script = await genScript(topic, slot.strong);
-      const outDir = path.join(ROOT, '.work', name);
-      fs.rmSync(outDir, { recursive: true, force: true }); fs.mkdirSync(outDir, { recursive: true });
-      // each slot is its own fresh video with the platform's CTA:
-      // Instagram = comment "אני"; TikTok = link in bio (sells the 30-day guide)
-      const cta = isTT ? { en: TT_CTA_EN[ptr % TT_CTA_EN.length], he: TT_CTA_HE, query: script.cta.query } : script.cta;
-      const content = {
-        outDir: outDir.replace(/\\/g, '/'), pixabayKey: PIXABAY, voice: script.voice,
-        segments: script.segments, cta, seed: name + '-' + Date.now(),
-        usedClipsFile: path.join(ROOT, 'state', 'used_clips.json'),
-      };
-      const cj = path.join(outDir, 'content.json');
-      fs.writeFileSync(cj, JSON.stringify(content), 'utf8');
-      execFileSync('node', [RENDER, cj], { stdio: 'inherit' });
-      execFileSync(FF, ['-y', '-hide_banner', '-loglevel', 'error', '-i', path.join(outDir, 'video.mp4'), '-c:v', 'libx264', '-crf', '26', '-maxrate', '2500k', '-bufsize', '5000k', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', path.join(VIDEOS, name + '.mp4')]);
-      const title = topic.length > 60 ? topic.slice(0, 57) + '...' : topic;
-      const caption = isTT ? TT_CAPTION : `${script.cta.he}\n\n${IG_HASHTAGS}`;
-      fs.rmSync(outDir, { recursive: true, force: true });
-      if (DRY) {
-        const kb = Math.round(fs.statSync(path.join(VIDEOS, name + '.mp4')).size / 1024);
-        console.log(`  [DRY_RUN] rendered ${name}.mp4 (${kb} KB) — not pushing, not scheduling.`);
-        madeCount++; continue;
-      }
-      fs.writeFileSync(STATE, String(ptr) + '\n');
-      fs.writeFileSync(LASTP, today + '\n');
-      await pushRepo(`video ${name}`);
       const url = `https://raw.githubusercontent.com/${REPO}/main/videos/${name}.mp4`;
       await waitReady(url);
       // if the slot time already passed (late run), publish a few minutes from now
       const due = new Date(Math.max(new Date(slot.dueAt).getTime(), Date.now() + 6 * 60000)).toISOString();
-      console.log(`  Scheduling ${name} @ ${due}${due !== slot.dueAt ? ' (late slot — publishing ASAP)' : ''}`);
       const r = await schedule(isTT ? TT : IG, url, due, caption, isTT, title);
-      console.log(`  ${slot.plat.toUpperCase()}:`, r.slice(0, 200));
-      madeCount++;
-    } catch (e) { console.error('  slot failed:', e.message); }
+      if (/"status":"(scheduled|sent)"/.test(r)) {
+        scheduledSet.add(name); scheduledList.push(name); saveScheduled();
+        scheduledCount++;
+        console.log(`  Scheduled +${slot.off}d ${slot.h}:00 ${slot.plat.toUpperCase()} @ ${due}`);
+      } else {
+        console.log(`  schedule failed for ${name}: ${r.slice(0, 160)}`);
+        if (/limit|queue|upgrade|plan/i.test(r)) { channelFull[slot.plat] = true; console.log(`  ${slot.plat.toUpperCase()} queue full — will top up on a later pass.`); }
+      }
+    } catch (e) { console.error('  schedule error:', e.message); }
   }
+  if (!DRY) { fs.writeFileSync(CAPP, JSON.stringify(captions)); await pushRepo('state: scheduled/captions'); }
 
-  if (!madeCount && attempted > 0) { console.error('No videos produced (all attempted slots failed).'); process.exit(1); }
-  if (!attempted) console.log('All slots already made — nothing to do.');
-  else console.log(`\nALL DONE — ${madeCount}/${attempted} videos rendered${DRY ? ' (dry run)' : ' and scheduled'}.`);
+  if (!madeCount && !scheduledCount && attempted > 0) { console.error('No videos produced (all attempted slots failed).'); process.exit(1); }
+  console.log(`\nALL DONE — rendered ${madeCount}, scheduled ${scheduledCount}${DRY ? ' (dry run)' : ''}.`);
 
   // keep the repo small: on Sunday runs squash all git history into one commit
   // (videos are heavy; without this the repo would outgrow GitHub within weeks)
-  if (!DRY && wd === 0) {
+  if (!DRY && wdFor(0) === 0) {
     try {
       execFileSync('git', ['checkout', '--orphan', 'squash'], { cwd: ROOT });
       execFileSync('git', ['add', '-A'], { cwd: ROOT });
