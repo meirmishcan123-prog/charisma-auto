@@ -20,26 +20,28 @@ const IG = process.env.BUFFER_INSTAGRAM_CHANNEL_ID;
 const TT = process.env.BUFFER_TIKTOK_CHANNEL_ID;
 const PIXABAY = process.env.PIXABAY_KEY;
 const REPO = process.env.GITHUB_REPOSITORY || 'meirmishcan123-prog/charisma-auto';
-// Per-platform posting hours by Israel weekday (0=Sunday .. 6=Saturday) — the
-// user's engagement-optimized schedule. Ranges were expanded to one video per hour.
-const TT_SCHED = {
-  0: [9, 13],               // Sunday
-  1: [11, 13],              // Monday
-  2: [7, 22],               // Tuesday
-  3: [21, 22],              // Wednesday
-  4: [13, 22],              // Thursday
-  5: [18, 20, 21, 22],      // Friday
-  6: [15, 16, 17, 21, 22, 23], // Saturday + motzash (strongest window)
+// A fresh video every 2 hours on BOTH platforms, PLUS the user's special
+// engagement hours (peak windows) merged in — peak-hour videos get an extra
+// strong hook. Israel weekday: 0=Sunday .. 6=Saturday.
+const BASE_GRID = [7, 9, 11, 13, 15, 17, 19, 21];
+const TT_SPECIAL = {
+  0: [9, 13], 1: [11, 13], 2: [7, 22], 3: [21, 22], 4: [13, 22],
+  5: [18, 20, 21, 22], 6: [15, 16, 17, 21, 22, 23], // Sat + motzash (strongest)
 };
-const IG_SCHED = {
-  0: [12, 19],              // Sunday
-  1: [15, 19],              // Monday
-  2: [12, 18, 19, 20],      // Tuesday (strongest day)
-  3: [8, 9, 19],            // Wednesday
-  4: [12, 18],              // Thursday
-  5: [11, 12, 13],          // Friday (before Shabbat)
-  6: [],                    // Saturday — no Instagram posts
+const IG_SPECIAL = {
+  0: [12, 19], 1: [15, 19], 2: [12, 18, 19, 20], 3: [8, 9, 19], 4: [12, 18],
+  5: [11, 12, 13], 6: [], // Friday before Shabbat only; no Instagram on Shabbat
 };
+function slotsFor(wd, plat) {
+  const special = (plat === 'tt' ? TT_SPECIAL : IG_SPECIAL)[wd] || [];
+  let grid = BASE_GRID;
+  if (plat === 'ig') {
+    if (wd === 6) grid = [];                          // Shabbat: no Instagram at all
+    if (wd === 5) grid = grid.filter((h) => h <= 13); // Friday: only before Shabbat
+  }
+  return [...new Set([...grid, ...special])].sort((a, b) => a - b)
+    .map((h) => ({ h, plat, strong: special.includes(h) }));
+}
 const MAX = parseInt(process.env.MAX_VIDEOS || '99', 10);
 const DO_TT = process.env.TIKTOK !== '0' && !!TT;
 const DRY = process.env.DRY_RUN === '1'; // render + host, but do NOT schedule/publish
@@ -69,8 +71,10 @@ function req(opts, body) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function genScript(topic) {
-  const PROMPT = `You are a top scriptwriter for the Hebrew Instagram/TikTok page @charisma.il (charisma, self-discipline, personal development). Write ONE ~55 second vertical video script about: "${topic}" that feels like a calm, cinematic, deep motivational reel.
+async function genScript(topic, strong) {
+  const strongNote = strong ? `
+- PEAK-HOURS POST: this video publishes in a peak engagement window. Make the hook EXTRA bold and scroll-stopping (a bigger claim, a sharper curiosity gap) and make the fear + jealousy beats hit noticeably harder.` : '';
+  const PROMPT = `You are a top scriptwriter for the Hebrew Instagram/TikTok page @charisma.il (charisma, self-discipline, personal development). Write ONE ~55 second vertical video script about: "${topic}" that feels like a calm, cinematic, deep motivational reel.${strongNote}
 Return ONLY JSON: { "voice":"en-US-ChristopherNeural", "segments":[{"en","he","query"}...], "cta":{"en","he","query"} }
 RULES:
 - 12-13 segments. "en"=short spoken English sentence (7-10 words). "he"=short natural Hebrew subtitle, simple 3rd-grade Hebrew, NO em dash, NO jargon.
@@ -144,17 +148,45 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
   const nowMs = Date.now();
   const wd = ilWeekday();
   const cand = [
-    ...(IG_SCHED[wd] || []).map((h) => ({ h, plat: 'ig' })),
-    ...(DO_TT ? (TT_SCHED[wd] || []) : []).map((h) => ({ h, plat: 'tt' })),
+    ...slotsFor(wd, 'ig'),
+    ...(DO_TT ? slotsFor(wd, 'tt') : []),
   ].map((s) => ({ ...s, dueAt: dueAtFor(s.h) })).sort((a, b) => a.h - b.h);
-  // normally only fill slots still ahead today; in dry-run render regardless of clock so it's testable anytime
-  const future = (DRY ? cand : cand.filter((s) => new Date(s.dueAt).getTime() > nowMs + 5 * 60000)).slice(0, MAX);
-  console.log(`Weekday ${wd} — slots to fill today:`, future.map((s) => s.h + ':00 ' + s.plat.toUpperCase()).join(', ') || '(none left today)');
+  // fill slots still ahead today, plus slots up to 90 min late (those publish at
+  // now+6min — better late than missed). Dry-run renders regardless of the clock.
+  const LATE_GRACE = 90 * 60000;
+  const future = (DRY ? cand : cand.filter((s) => new Date(s.dueAt).getTime() > nowMs - LATE_GRACE)).slice(0, MAX);
+  console.log(`Weekday ${wd} — slots to fill today:`, future.map((s) => s.h + ':00 ' + s.plat.toUpperCase() + (s.strong ? '*' : '')).join(', ') || '(none left today)');
   if (!future.length) { console.log('Nothing to schedule.'); return; }
 
   const stamp = ilYMD().map((n, i) => (i ? String(n + (i === 1 ? 1 : 0)).padStart(2, '0') : n)).join(''); // yyyymmdd-ish
-  const made = [];
-  let attempted = 0;
+
+  // prune old videos up front (keep the most recent ~2 days worth)
+  if (!DRY) {
+    const all = fs.readdirSync(VIDEOS).filter((f) => f.endsWith('.mp4')).sort();
+    for (const f of all.slice(0, Math.max(0, all.length - KEEP * 2))) fs.rmSync(path.join(VIDEOS, f));
+  }
+
+  execFileSync('git', ['config', 'user.name', 'charisma-bot']);
+  execFileSync('git', ['config', 'user.email', 'bot@users.noreply.github.com']);
+  const pushRepo = async (msg) => {
+    execFileSync('git', ['add', '-A'], { cwd: ROOT });
+    try { execFileSync('git', ['commit', '-m', msg], { cwd: ROOT }); } catch (e) { return; } // nothing to commit
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try { execFileSync('git', ['push'], { cwd: ROOT, stdio: 'inherit' }); return; }
+      catch (e) {
+        if (attempt === 5) throw e;
+        console.log('  push rejected — pulling --rebase and retrying...');
+        try { execFileSync('git', ['pull', '--rebase', 'origin', 'main'], { cwd: ROOT, stdio: 'inherit' }); } catch (e2) {}
+        await sleep(2000);
+      }
+    }
+  };
+  const waitReady = async (u) => { for (let i = 0; i < 20; i++) { if (await urlReady(u)) return true; await sleep(3000); } return false; };
+
+  // render -> push -> schedule EACH video immediately, so early slots go live while
+  // later ones are still rendering (an entire batch used to schedule only at the end,
+  // which lost early slots whenever the run started late).
+  let madeCount = 0, attempted = 0;
   for (const slot of future) {
     const topic = topics[ptr % topics.length]; ptr++;
     const isTT = slot.plat === 'tt';
@@ -164,8 +196,8 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
     if (fs.existsSync(path.join(VIDEOS, name + '.mp4'))) { console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()} — already made today, skipping ===`); continue; }
     attempted++;
     try {
-      console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()}  topic="${topic}" ===`);
-      const script = await genScript(topic);
+      console.log(`\n=== ${slot.h}:00 ${slot.plat.toUpperCase()}${slot.strong ? ' (peak)' : ''}  topic="${topic}" ===`);
+      const script = await genScript(topic, slot.strong);
       const outDir = path.join(ROOT, '.work', name);
       fs.rmSync(outDir, { recursive: true, force: true }); fs.mkdirSync(outDir, { recursive: true });
       // each slot is its own fresh video with the platform's CTA:
@@ -181,52 +213,41 @@ const STATE = path.join(ROOT, 'state', 'next_topic.txt');
       execFileSync('node', [RENDER, cj], { stdio: 'inherit' });
       execFileSync(FF, ['-y', '-hide_banner', '-loglevel', 'error', '-i', path.join(outDir, 'video.mp4'), '-c:v', 'libx264', '-crf', '26', '-maxrate', '2500k', '-bufsize', '5000k', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', path.join(VIDEOS, name + '.mp4')]);
       const title = topic.length > 60 ? topic.slice(0, 57) + '...' : topic;
-      made.push({ name, dueAt: slot.dueAt, plat: slot.plat, title, caption: isTT ? TT_CAPTION : `${script.cta.he}\n\n${IG_HASHTAGS}` });
+      const caption = isTT ? TT_CAPTION : `${script.cta.he}\n\n${IG_HASHTAGS}`;
       fs.rmSync(outDir, { recursive: true, force: true });
+      if (DRY) {
+        const kb = Math.round(fs.statSync(path.join(VIDEOS, name + '.mp4')).size / 1024);
+        console.log(`  [DRY_RUN] rendered ${name}.mp4 (${kb} KB) — not pushing, not scheduling.`);
+        madeCount++; continue;
+      }
+      fs.writeFileSync(STATE, String(ptr) + '\n');
+      fs.writeFileSync(LASTP, today + '\n');
+      await pushRepo(`video ${name}`);
+      const url = `https://raw.githubusercontent.com/${REPO}/main/videos/${name}.mp4`;
+      await waitReady(url);
+      // if the slot time already passed (late run), publish a few minutes from now
+      const due = new Date(Math.max(new Date(slot.dueAt).getTime(), Date.now() + 6 * 60000)).toISOString();
+      console.log(`  Scheduling ${name} @ ${due}${due !== slot.dueAt ? ' (late slot — publishing ASAP)' : ''}`);
+      const r = await schedule(isTT ? TT : IG, url, due, caption, isTT, title);
+      console.log(`  ${slot.plat.toUpperCase()}:`, r.slice(0, 200));
+      madeCount++;
     } catch (e) { console.error('  slot failed:', e.message); }
   }
-  if (!made.length) {
-    if (attempted === 0) { console.log('All slots already made — nothing to do.'); return; }
-    console.error('No videos produced (all attempted slots failed).'); process.exit(1);
-  }
 
-  if (DRY) {
-    for (const v of made) { const kb = Math.round(fs.statSync(path.join(VIDEOS, v.name + '.mp4')).size / 1024); console.log(`  [DRY_RUN] rendered ${v.name}.mp4 (${kb} KB) — not pushing, not scheduling.`); }
-    console.log('\nDRY RUN OK — rendering works. ' + made.length + ' video(s) produced.'); return;
-  }
+  if (!madeCount && attempted > 0) { console.error('No videos produced (all attempted slots failed).'); process.exit(1); }
+  if (!attempted) console.log('All slots already made — nothing to do.');
+  else console.log(`\nALL DONE — ${madeCount}/${attempted} videos rendered${DRY ? ' (dry run)' : ' and scheduled'}.`);
 
-  // prune old videos (keep the most recent KEEP posts = KEEP*2 files)
-  const all = fs.readdirSync(VIDEOS).filter((f) => f.endsWith('.mp4')).sort();
-  for (const f of all.slice(0, Math.max(0, all.length - KEEP * 2))) fs.rmSync(path.join(VIDEOS, f));
-
-  // commit + push all new videos so their raw URLs go live
-  fs.writeFileSync(STATE, String(ptr) + '\n');
-  fs.writeFileSync(LASTP, today + '\n');
-  execFileSync('git', ['config', 'user.name', 'charisma-bot']);
-  execFileSync('git', ['config', 'user.email', 'bot@users.noreply.github.com']);
-  execFileSync('git', ['add', '-A'], { cwd: ROOT });
-  execFileSync('git', ['commit', '-m', 'daily videos ' + stamp], { cwd: ROOT });
-  // resilient push: if the remote moved (a concurrent commit), rebase and retry so we
-  // never abort before scheduling (this is exactly what broke on 2026-07-09).
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try { execFileSync('git', ['push'], { cwd: ROOT, stdio: 'inherit' }); break; }
-    catch (e) {
-      if (attempt === 5) throw e;
-      console.log('  push rejected — pulling --rebase and retrying...');
-      try { execFileSync('git', ['pull', '--rebase', 'origin', 'main'], { cwd: ROOT, stdio: 'inherit' }); } catch (e2) {}
-      await sleep(2000);
-    }
+  // keep the repo small: on Sunday runs squash all git history into one commit
+  // (videos are heavy; without this the repo would outgrow GitHub within weeks)
+  if (!DRY && wd === 0) {
+    try {
+      execFileSync('git', ['checkout', '--orphan', 'squash'], { cwd: ROOT });
+      execFileSync('git', ['add', '-A'], { cwd: ROOT });
+      execFileSync('git', ['commit', '-m', 'weekly history squash'], { cwd: ROOT });
+      execFileSync('git', ['push', '-f', 'origin', 'squash:main'], { cwd: ROOT });
+      console.log('Weekly history squash pushed.');
+    } catch (e) { console.log('squash skipped:', e.message); }
   }
-
-  // schedule each video to its own platform at its own hour
-  const waitReady = async (u) => { for (let i = 0; i < 20; i++) { if (await urlReady(u)) return true; await sleep(3000); } return false; };
-  for (const v of made) {
-    const url = `https://raw.githubusercontent.com/${REPO}/main/videos/${v.name}.mp4`;
-    console.log(`\nScheduling ${v.name} @ ${v.dueAt}`);
-    await waitReady(url);
-    const r = await schedule(v.plat === 'tt' ? TT : IG, url, v.dueAt, v.caption, v.plat === 'tt', v.title);
-    console.log(`  ${v.plat.toUpperCase()}:`, r.slice(0, 200));
-  }
-  console.log('\nALL DONE — scheduled ' + made.length + ' videos.');
   process.exit(0); // exit cleanly so the runner step doesn't hang on open sockets
 })().catch((e) => { console.error('FATAL', e.message); process.exit(1); });
