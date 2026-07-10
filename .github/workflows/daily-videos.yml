@@ -18,6 +18,7 @@ on:
     # whatever the morning pass missed (e.g. Gemini daily quota resets ~10:00 IL)
     - cron: '7 8 * * *'    # ~11:07 IDT — heal missing midday/evening slots
     - cron: '7 13 * * *'   # ~16:07 IDT — heal missing evening slots
+    - cron: '7 16 * * *'   # ~19:07 IDT — last-chance heal for late-evening slots
   workflow_dispatch:
     inputs:
       max:
