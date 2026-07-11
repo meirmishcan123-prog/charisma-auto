@@ -65,7 +65,9 @@ for (const [k, v] of Object.entries({ GEMINI_API_KEY: GEMINI, BUFFER_ACCESS_TOKE
 
 function req(opts, body) {
   return new Promise((res, rej) => {
-    const r = https.request(opts, (x) => { let d = ''; x.on('data', (c) => d += c); x.on('end', () => res({ status: x.statusCode, body: d })); });
+    // decode ONCE from concatenated bytes — per-chunk string concat corrupts any
+    // multibyte (Hebrew/emoji) character split across a chunk boundary -> "��".
+    const r = https.request(opts, (x) => { const ch = []; x.on('data', (c) => ch.push(c)); x.on('end', () => res({ status: x.statusCode, body: Buffer.concat(ch).toString('utf8') })); });
     r.on('error', rej); if (body) r.write(body); r.end();
   });
 }
