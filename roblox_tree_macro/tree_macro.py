@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Roblox Tree-Chopping Macro (WASD auto-movement, Roblox-compatible input)
-========================================================================
+Roblox Tree-Chopping Macro  –  seek & chop
+==========================================
 
-חוצבים עצים ע"י התקרבות אליהם, לכן המקרו מזיז את הדמות אוטומטית בשדה בעזרת
-מקשי התנועה W/A/S/D כדי לעבור בין כל העצים ולחצוב אותם.
+חוצבים עץ ע"י עמידה קרוב אליו. לכן המקרו:
+  1. סורק את המסך כל רגע ומזהה איפה יש עצים (לפי הצבע).
+  2. בוחר את העץ הקרוב ביותר לדמות.
+  3. מזיז את הדמות (W/A/S/D) לכיוון העץ עד שהיא לידו.
+  4. עומד לידו רגע כדי לחצוב, ואז ממשיך לעץ הבא. חוזר חלילה.
 
-חשוב: רובלוקס מתעלם ממקשים "וירטואליים" רגילים, לכן כאן שולחים את המקשים
-בשיטת *scancode* דרך SendInput של Windows – זו השיטה שרובלוקס מזהה.
+המקשים נשלחים בשיטת scancode (SendInput) – מה שרובלוקס מזהה.
 
 מקשי קיצור:
     F6 – התחל / עצור        F8 – יציאה
 
 הפעלה:
-    python tree_macro.py                 # patrol (תבנית ריבוע) – ברירת מחדל
-    python tree_macro.py --mode random   # הליכה אקראית
-    python tree_macro.py --step 0.7      # שניות להחזיק כל כיוון
-    python tree_macro.py --keys arrows   # חיצים במקום WASD
+    python tree_macro.py                    # מצב seek (חכם) – ברירת מחדל
+    python tree_macro.py --char 960,620     # מיקום הדמות על המסך (אם צריך לכוון)
+    python tree_macro.py --reach 80         # מרחק בפיקסלים שנחשב "ליד העץ"
+    python tree_macro.py --mode patrol      # גיבוי: הליכה עיוורת בריבוע
 """
 
 import argparse
 import ctypes
+import math
 import random
 import sys
 import threading
@@ -30,22 +33,26 @@ import time
 try:
     from pynput import keyboard
 except ImportError:
-    sys.exit("חסרה ספריה: pynput.  התקן עם:  pip install pynput")
+    sys.exit("חסרה ספריה: pynput.  התקן:  pip install pynput mss numpy")
 
+try:
+    import numpy as np
+    from mss import mss
+except ImportError:
+    sys.exit("חסרות ספריות: numpy / mss.  התקן:  pip install pynput mss numpy")
 
-# --------------------------------------------------------------------------- #
-#  שליחת מקשים דרך SendInput עם scancode – מה שרובלוקס מזהה                     #
-# --------------------------------------------------------------------------- #
 if sys.platform != "win32":
-    sys.exit("המקרו הזה בנוי ל-Windows (רובלוקס PC). הרץ אותו על מחשב Windows.")
+    sys.exit("המקרו בנוי ל-Windows (רובלוקס PC).")
 
+
+# --------------------------------------------------------------------------- #
+#  שליחת מקשים בשיטת scancode – מה שרובלוקס מזהה                                #
+# --------------------------------------------------------------------------- #
 user32 = ctypes.windll.user32
 PUL = ctypes.POINTER(ctypes.c_ulong)
-
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
-MAPVK_VK_TO_VSC = 0
 INPUT_KEYBOARD = 1
 
 
@@ -75,9 +82,7 @@ class _Input(ctypes.Structure):
 
 
 def _send(scan, extended, keyup):
-    flags = KEYEVENTF_SCANCODE
-    if extended:
-        flags |= KEYEVENTF_EXTENDEDKEY
+    flags = KEYEVENTF_SCANCODE | (KEYEVENTF_EXTENDEDKEY if extended else 0)
     if keyup:
         flags |= KEYEVENTF_KEYUP
     ki = _KeyBdInput(0, scan & 0xFF, flags, 0, ctypes.pointer(ctypes.c_ulong(0)))
@@ -86,106 +91,198 @@ def _send(scan, extended, keyup):
 
 
 def vk_to_scan(vk):
-    return user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+    return user32.MapVirtualKeyW(vk, 0)
 
 
-# vk codes: letters = ord(upper); arrows are extended keys.
-VK_ARROWS = {"up": 0x26, "left": 0x25, "down": 0x28, "right": 0x27}
+# W/A/S/D scancodes (not extended)
+KEY = {
+    "up":    (vk_to_scan(ord("W")), False),
+    "left":  (vk_to_scan(ord("A")), False),
+    "down":  (vk_to_scan(ord("S")), False),
+    "right": (vk_to_scan(ord("D")), False),
+}
+_HELD = set()
 
 
-def make_keymap(spec):
-    """מחזיר מיפוי כיוון -> (scancode, extended)."""
-    spec = spec.strip().lower()
-    if spec in ("arrows", "arrow"):
-        return {d: (vk_to_scan(vk), True) for d, vk in VK_ARROWS.items()}
-    if len(spec) != 4:
-        spec = "wasd"
-    up, left, down, right = spec[0], spec[1], spec[2], spec[3]
-    order = {"up": up, "left": left, "down": down, "right": right}
-    return {d: (vk_to_scan(ord(ch.upper())), False) for d, ch in order.items()}
+def set_key(direction, down):
+    scan, ext = KEY[direction]
+    if down and direction not in _HELD:
+        _send(scan, ext, keyup=False)
+        _HELD.add(direction)
+    elif not down and direction in _HELD:
+        _send(scan, ext, keyup=True)
+        _HELD.discard(direction)
 
 
+def release_all_keys():
+    for d in list(_HELD):
+        set_key(d, False)
+
+
+# --------------------------------------------------------------------------- #
+#  זיהוי עצים לפי צבע                                                          #
+# --------------------------------------------------------------------------- #
+def tree_color_mask(r, g, b):
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    saturated = (mx - mn) > 45
+    green = (g > 110) & (g - r > 28) & (g - b > 28)
+    yellow = (r > 175) & (g > 155) & (b < 140) & (r - b > 80) & (g - b > 55)
+    orange = (r > 195) & (g > 85) & (g < 180) & (b < 115) & (r - g > 55) & (g - b > 25)
+    pink = ((r > 185) & (b > 155) & (r - g > 28) & (b - g > 10) & (r - b > -25) & (r - b < 75))
+    cyan = ((g > 170) & (b > 170) & (g - r > 35) & (b - r > 35) & (np.abs(g - b) < 45))
+    return (green | yellow | orange | pink | cyan) & saturated
+
+
+def find_trees(region):
+    """מחזיר רשימת מרכזי-עצים (x,y) בקואורדינטות מסך, ממוין מהגדול לקטן."""
+    with mss() as sct:
+        raw = np.array(sct.grab(region))
+    b = raw[:, :, 0].astype(np.int16)
+    g = raw[:, :, 1].astype(np.int16)
+    r = raw[:, :, 2].astype(np.int16)
+    mask = tree_color_mask(r, g, b)
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return []
+    cell = 46
+    buckets = {}
+    for x, y in zip(xs, ys):
+        k = (x // cell, y // cell)
+        acc = buckets.setdefault(k, [0, 0, 0])
+        acc[0] += x; acc[1] += y; acc[2] += 1
+    out = []
+    for sx, sy, c in buckets.values():
+        if c < 55:
+            continue
+        out.append((region["left"] + sx // c, region["top"] + sy // c, c))
+    out.sort(key=lambda t: t[2], reverse=True)
+    return [(x, y) for x, y, _ in out]
+
+
+# --------------------------------------------------------------------------- #
+#  לוגיקת seek – ללכת לעץ הקרוב ולעמוד לידו                                     #
+# --------------------------------------------------------------------------- #
 class MacroState:
     def __init__(self):
         self.running = False
         self.alive = True
 
 
-def hold(combo, duration, state):
-    """לוחץ ומחזיק כיוון (או שניים לאלכסון) למשך duration, עם בדיקת עצירה."""
-    for scan, ext in combo:
-        _send(scan, ext, keyup=False)
-    t_end = time.time() + duration
-    try:
-        while time.time() < t_end:
-            if not state.running or not state.alive:
-                break
-            time.sleep(0.02)
-    finally:
-        for scan, ext in combo:
-            _send(scan, ext, keyup=True)
+def steer_towards(char, tree, deadzone):
+    """מחליט אילו מקשים ללחוץ כדי להתקדם מהדמות לכיוון העץ."""
+    dx = tree[0] - char[0]
+    dy = tree[1] - char[1]
+    set_key("up",    dy < -deadzone)   # עץ מעל הדמות → קדימה (W)
+    set_key("down",  dy >  deadzone)   # עץ מתחת → אחורה (S)
+    set_key("left",  dx < -deadzone)   # עץ משמאל → A
+    set_key("right", dx >  deadzone)   # עץ מימין → D
 
 
-def run_patrol(state, step, km):
-    order = [(km["up"],), (km["right"],), (km["down"],), (km["left"],)]
-    print(f"[patrol] מסתובב בתבנית ריבוע, {step}s לכל כיוון.")
+def run_seek(state, char, reach, region):
+    print(f"[seek] דמות ב-{char}, סורק עצים ומתקרב (reach={reach}px).")
+    chop_until = 0.0
+    while state.alive:
+        if not state.running:
+            release_all_keys(); time.sleep(0.05); continue
+
+        trees = find_trees(region)
+        if not trees:
+            release_all_keys(); time.sleep(0.15); continue
+
+        # העץ הקרוב ביותר לדמות
+        nearest = min(trees, key=lambda t: math.hypot(t[0] - char[0], t[1] - char[1]))
+        dist = math.hypot(nearest[0] - char[0], nearest[1] - char[1])
+
+        if dist <= reach:
+            # ליד העץ – עומדים רגע וחוצבים
+            release_all_keys()
+            time.sleep(0.5)
+        else:
+            steer_towards(char, nearest, deadzone=max(20, reach // 3))
+            time.sleep(0.12)   # פסיעה קצרה ואז סורקים שוב (הגה סגור)
+    release_all_keys()
+
+
+def run_patrol(state, step, region=None):
+    order = ["up", "right", "down", "left"]
+    print(f"[patrol] הליכה עיוורת בריבוע, {step}s לכל כיוון.")
     idx = 0
     while state.alive:
         if not state.running:
-            time.sleep(0.05); continue
-        hold(order[idx % 4], step, state)
+            release_all_keys(); time.sleep(0.05); continue
+        release_all_keys()
+        set_key(order[idx % 4], True)
+        t_end = time.time() + step
+        while time.time() < t_end and state.running and state.alive:
+            time.sleep(0.02)
         idx += 1
+    release_all_keys()
 
 
-def run_random(state, step, km):
-    singles = [(km["up"],), (km["down"],), (km["left"],), (km["right"],)]
-    diagonals = [(km["up"], km["left"]), (km["up"], km["right"]),
-                 (km["down"], km["left"]), (km["down"], km["right"])]
-    print(f"[random] הליכה אקראית, ~{step}s לכל צעד.")
-    while state.alive:
-        if not state.running:
-            time.sleep(0.05); continue
-        combo = random.choice(diagonals) if random.random() < 0.4 else random.choice(singles)
-        hold(combo, step * random.uniform(0.6, 1.4), state)
+# --------------------------------------------------------------------------- #
+def parse_char(arg):
+    if arg:
+        x, y = arg.split(",")
+        return (int(x), int(y))
+    w = user32.GetSystemMetrics(0)
+    h = user32.GetSystemMetrics(1)
+    return (w // 2, int(h * 0.56))   # ניחוש טוב: מרכז, מעט מתחת לאמצע
+
+
+def field_region():
+    w = user32.GetSystemMetrics(0)
+    h = user32.GetSystemMetrics(1)
+    left = int(w * 0.13); right = int(w * 0.22)
+    top = int(h * 0.08); bottom = int(h * 0.13)
+    return {"left": left, "top": top, "width": w - left - right, "height": h - top - bottom}
 
 
 def build_listener(state):
     def on_press(key):
         if key == keyboard.Key.f6:
             state.running = not state.running
-            print("▶️  זז! הדמות מסתובבת בשדה." if state.running else "⏸️  נעצר.")
+            print("▶️  פועל! מחפש עצים וחוצב." if state.running else "⏸️  נעצר.")
+            if not state.running:
+                release_all_keys()
         elif key == keyboard.Key.f8:
             print("👋 יוצא...")
-            state.running = False
-            state.alive = False
+            state.running = False; state.alive = False
+            release_all_keys()
             return False
     return keyboard.Listener(on_press=on_press)
 
 
 def main():
-    p = argparse.ArgumentParser(description="מקרו רובלוקס: תנועה אוטומטית (WASD) לחציבת עצים.")
-    p.add_argument("--mode", choices=["patrol", "random"], default="patrol")
-    p.add_argument("--step", type=float, default=0.7)
-    p.add_argument("--keys", type=str, default="wasd")
+    p = argparse.ArgumentParser(description="מקרו רובלוקס: מזהה עצים והולך לחצוב.")
+    p.add_argument("--mode", choices=["seek", "patrol"], default="seek")
+    p.add_argument("--char", type=str, default=None, help="מיקום הדמות על המסך x,y")
+    p.add_argument("--reach", type=int, default=85, help="מרחק שנחשב ליד העץ (px)")
+    p.add_argument("--step", type=float, default=0.6, help="patrol: שניות לכל כיוון")
     p.add_argument("--start", action="store_true")
     args = p.parse_args()
 
-    km = make_keymap(args.keys)
-    state = MacroState()
-    state.running = args.start
+    char = parse_char(args.char)
+    region = field_region()
+    state = MacroState(); state.running = args.start
 
-    print("=" * 56)
-    print("  Roblox Tree Macro  –  תנועה אוטומטית (scancode)")
-    print("=" * 56)
-    print(f"  מצב: {args.mode}   |   קצב: {args.step}s לכל כיוון")
+    print("=" * 58)
+    print("  Roblox Tree Macro  –  seek & chop")
+    print("=" * 58)
+    print(f"  מצב: {args.mode}   דמות: {char}   reach: {args.reach}px")
     print("  F6 = התחל/עצור      F8 = יציאה")
-    print("=" * 56)
+    print("=" * 58)
     print("  1) פתח את רובלוקס ולחץ עליו שיהיה בפוקוס.")
-    print("  2) לחץ F6. הדמות אמורה להתחיל לזוז.")
-    print("=" * 56)
+    print("  2) לחץ F6. הדמות תלך לעצים ותחצוב.")
+    print("  אם היא הולכת לכיוון הלא נכון – סובב את המצלמה שהדמות")
+    print("  תסתכל 'למעלה' על המסך, או כוונן --char.")
+    print("=" * 58)
 
-    target = run_random if args.mode == "random" else run_patrol
-    threading.Thread(target=target, args=(state, args.step, km), daemon=True).start()
+    if args.mode == "patrol":
+        worker = threading.Thread(target=run_patrol, args=(state, args.step, region), daemon=True)
+    else:
+        worker = threading.Thread(target=run_seek, args=(state, char, args.reach, region), daemon=True)
+    worker.start()
 
     listener = build_listener(state)
     listener.start()
@@ -193,6 +290,7 @@ def main():
         listener.join()
     except KeyboardInterrupt:
         state.alive = False
+        release_all_keys()
 
 
 if __name__ == "__main__":
