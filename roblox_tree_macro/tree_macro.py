@@ -74,26 +74,53 @@ def human_readable_pos(pos):
 # --------------------------------------------------------------------------- #
 #  מצב זיהוי צבע – מזהה עצים ולוחץ עליהם                                        #
 # --------------------------------------------------------------------------- #
-def find_tree_targets(region, min_area=60):
+def tree_color_mask(r, g, b):
     """
-    מצלם את אזור המסך ומחזיר רשימת נקודות (x, y) של אשכולות פיקסלים שנראים
-    כמו עצים (ירוק בהיר או צהוב-בהיר), ממוינות מהאשכול הגדול לקטן.
+    מקבל ערוצי R/G/B (מערכי numpy) ומחזיר מסכה בוליאנית של פיקסלים שנראים
+    כמו עצים. הגוונים כוילו לפי צילום המסך של המשחק:
 
-    region – dict עם top/left/width/height (פורמט של mss).
+      • עצים ירוקים  – ירוק-דשא רווי: הירוק שולט בבירור על האדום והכחול.
+      • עצים צהובים  – צהוב-זהוב בהיר: אדום+ירוק גבוהים, כחול נמוך.
+
+    בנוסף מסננים החוצה:
+      • שלג / לבן / כפתורי UI בהירים – פיקסל שכל הערוצים שלו גבוהים (min>165).
+      • קרח כחלחל וקרקע חומה – לא עומדים ביחסי הצבע ממילא.
     """
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+
+    # לא-לבן/לא-שלג: חייבת להיות רוויה מינימלית (הפרש בין הערוץ החזק לחלש)
+    saturated = (mx - mn) > 45
+    not_bright_white = mn < 165
+
+    # עץ ירוק: ירוק הוא הערוץ הדומיננטי, במרחק ברור מאדום ומכחול
+    green = (g > 110) & (g - r > 28) & (g - b > 28)
+
+    # עץ צהוב: אדום וירוק גבוהים וקרובים, כחול נמוך משמעותית
+    yellow = (r > 175) & (g > 155) & (b < 140) & (r - b > 80) & (g - b > 55)
+
+    return (green | yellow) & saturated & not_bright_white
+
+
+def _grab_region(region):
     with mss() as sct:
         raw = np.array(sct.grab(region))  # BGRA
-
     b = raw[:, :, 0].astype(np.int16)
     g = raw[:, :, 1].astype(np.int16)
     r = raw[:, :, 2].astype(np.int16)
+    return r, g, b, raw
 
-    # ירוק בהיר של העצים: ירוק דומיננטי על פני אדום וכחול
-    green = (g > 120) & (g - r > 25) & (g - b > 25)
-    # צהוב בהיר של העצים המיוחדים: אדום+ירוק גבוהים, כחול נמוך
-    yellow = (r > 170) & (g > 170) & (b < 140)
 
-    mask = green | yellow
+def find_tree_targets(region, min_area=60):
+    """
+    מצלם את אזור המסך ומחזיר רשימת נקודות (x, y) של אשכולות פיקסלים שנראים
+    כמו עצים, ממוינות מהאשכול הגדול לקטן.
+
+    region – dict עם top/left/width/height (פורמט של mss).
+    """
+    r, g, b, _ = _grab_region(region)
+    mask = tree_color_mask(r, g, b)
+
     ys, xs = np.where(mask)
     if len(xs) == 0:
         return []
@@ -196,14 +223,65 @@ def build_hotkey_listener(state, mode):
 
 
 def parse_region(arg):
-    """מפרש 'left,top,width,height' לפורמט של mss, או None ל-מסך מלא."""
+    """
+    מפרש 'left,top,width,height' לפורמט של mss.
+
+    ללא ארגומנט מחזיר אזור ברירת מחדל שמכסה את מגרש המשחק בלבד ומתעלם מפאנלי
+    ה-UI: מחתך שוליים באחוזים (עמיד לכל רזולוציה) – 13% שמאל, 22% ימין (הטבלה
+    והכפתורים הצבעוניים), 8% למעלה (פס הרמה) ו-13% למטה (כפתורי Auto והקלפים).
+    כך המקרו לא לוחץ בטעות על כפתורי ה-UI הירוקים/צהובים.
+    """
     if not arg:
         w, h = pyautogui.size()
-        return {"left": 0, "top": 0, "width": w, "height": h}
+        left = int(w * 0.13)
+        right = int(w * 0.22)
+        top = int(h * 0.08)
+        bottom = int(h * 0.13)
+        return {"left": left, "top": top,
+                "width": w - left - right, "height": h - top - bottom}
     parts = [int(p) for p in arg.split(",")]
     if len(parts) != 4:
         raise argparse.ArgumentTypeError("region חייב להיות: left,top,width,height")
     return {"left": parts[0], "top": parts[1], "width": parts[2], "height": parts[3]}
+
+
+def save_preview(region, out_path="tree_macro_preview.png"):
+    """
+    מצלם את אזור הסריקה, מסמן באדום כל עץ שזוהה, ושומר לתמונה כדי שאפשר יהיה
+    לוודא שהזיהוי מדויק. שימושי לכיוונון הצבעים.
+    """
+    r, g, b, raw = _grab_region(region)
+    mask = tree_color_mask(r, g, b)
+    img = raw.copy()
+    # הבהרת הפיקסלים שזוהו (צובע אותם באדום בולט)
+    img[mask, 0] = 40    # B
+    img[mask, 1] = 40    # G
+    img[mask, 2] = 255   # R
+
+    targets = find_tree_targets(region)
+    # מסמן ריבוע סביב כל מרכז עץ שזוהה
+    for (cx, cy) in targets:
+        px = cx - region["left"]
+        py = cy - region["top"]
+        for d in range(-9, 10):
+            for (ax, ay) in [(px + d, py - 9), (px + d, py + 9),
+                             (px - 9, py + d), (px + 9, py + d)]:
+                if 0 <= ay < img.shape[0] and 0 <= ax < img.shape[1]:
+                    img[ay, ax, :3] = (255, 255, 0)  # מסגרת ציאן/צהוב
+
+    try:
+        from mss.tools import to_png
+        # img הוא BGRA (הפורמט של mss) – to_png מצפה בדיוק לזה.
+        to_png(img.astype("uint8").tobytes(), (img.shape[1], img.shape[0]),
+               output=out_path)
+    except Exception:
+        try:
+            from PIL import Image
+            Image.fromarray(img[:, :, :3][:, :, ::-1].astype("uint8")).save(out_path)
+        except Exception as e:
+            print(f"לא ניתן לשמור תצוגה מקדימה: {e}")
+            return None, len(targets)
+    return out_path, len(targets)
 
 
 def main():
@@ -216,14 +294,27 @@ def main():
                         help="לחיצות בשנייה (clicks per second). ברירת מחדל 10.")
     parser.add_argument("--region", type=str, default=None,
                         help="אזור סריקה למצב detect: left,top,width,height. "
-                             "ברירת מחדל: כל המסך.")
+                             "ברירת מחדל: מגרש המשחק בלבד (מתעלם מפאנלי ה-UI).")
     parser.add_argument("--start", action="store_true",
                         help="התחל את המקרו מיד בלי להמתין ל-F6.")
+    parser.add_argument("--preview", action="store_true",
+                        help="מצלם את אזור הסריקה, מסמן את העצים שזוהו, שומר "
+                             "לתמונה tree_macro_preview.png ויוצא. לבדיקת הזיהוי.")
     args = parser.parse_args()
 
-    if args.mode == "detect" and not _HAS_VISION:
-        sys.exit("מצב detect דורש numpy ו-mss.  התקן:  pip install -r requirements.txt\n"
+    if (args.mode == "detect" or args.preview) and not _HAS_VISION:
+        sys.exit("מצב detect/preview דורש numpy ו-mss.  התקן:  pip install -r requirements.txt\n"
                  "או השתמש במצב הפשוט:  python tree_macro.py --mode spam")
+
+    if args.preview:
+        region = parse_region(args.region)
+        print(f"מצלם תצוגה מקדימה של האזור {region} ...")
+        result = save_preview(region)
+        if result and result[0]:
+            print(f"✅ נשמר: {result[0]}  |  זוהו {result[1]} עצים.")
+            print("   פתח את התמונה: הריבועים = עצים שזוהו, אדום = פיקסלי-עץ.")
+            print("   אם משהו לא מדויק, כוונן את הצבעים ב-tree_color_mask().")
+        return
 
     state = MacroState()
     state.running = args.start
